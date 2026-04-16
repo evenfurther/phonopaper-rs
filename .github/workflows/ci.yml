@@ -1,0 +1,269 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable + rustfmt)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --check --all
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run Clippy (pedantic, all targets)
+        run: cargo clippy --workspace --all-targets
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --workspace
+
+  bench-criterion:
+    name: Criterion benchmarks (smoke)
+    runs-on: ubuntu-latest
+    env:
+      # .cargo/config.toml sets target-cpu=native for local dev; override it
+      # here so the benchmarks compile for the generic CI runner CPU.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run Criterion benchmarks
+        # Run with a very short warm-up and measurement time just to verify
+        # the benchmarks compile and execute without errors.  Timing accuracy
+        # is not expected in CI; use the local baselines in AGENTS.md for that.
+        run: |
+          cargo bench -p phonopaper-rs \
+            --bench decode \
+            --bench encode \
+            -- --warm-up-time 1 --measurement-time 2
+
+  bench-iai:
+    name: IAI-Callgrind benchmarks
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      actions: read
+    env:
+      # .cargo/config.toml sets target-cpu=native for local dev; override it
+      # here so the benchmarks compile for the generic CI runner CPU and
+      # Callgrind does not encounter illegal instructions (SIGILL).
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+
+      - name: Install iai-callgrind-runner
+        run: |
+          IAI_VERSION=$(cargo metadata --format-version 1 \
+            | python3 -c "
+          import sys, json
+          meta = json.load(sys.stdin)
+          for pkg in meta['packages']:
+              if pkg['name'] == 'iai-callgrind':
+                  print(pkg['version'])
+                  break
+          ")
+          cargo install iai-callgrind-runner --version "$IAI_VERSION"
+
+      # ── On PRs: restore the baseline produced by the last main push ────────
+
+      - name: Download IAI baseline
+        if: github.event_name == 'pull_request'
+        id: iai_baseline
+        uses: dawidd6/action-download-artifact@v9
+        with:
+          name: iai-baselines
+          branch: ${{ github.base_ref }}
+          workflow: ci.yml
+          event: push
+          if_no_artifact_found: warn
+          path: target/iai
+
+      # ── Run benchmarks ─────────────────────────────────────────────────────
+      # On main: save a fresh baseline named "main".
+      # On PRs: compare against "main" baseline (if it was restored above).
+
+      - name: Run IAI-Callgrind benchmarks (main — save baseline)
+        if: github.event_name == 'push'
+        env:
+          IAI_CALLGRIND_SAVE_BASELINE: main
+        run: |
+          cargo bench -p phonopaper-rs \
+            --bench decode_iai \
+            --bench encode_iai
+
+      - name: Run IAI-Callgrind benchmarks (PR — compare against baseline)
+        if: github.event_name == 'pull_request'
+        # Capture output for the PR comment; fall back gracefully when no
+        # baseline exists (iai-callgrind just prints absolute numbers then).
+        run: |
+          CARGO_TERM_COLOR=never \
+          IAI_CALLGRIND_BASELINE=main \
+            cargo bench -p phonopaper-rs \
+              --bench decode_iai \
+              --bench encode_iai \
+            2>&1 | tee iai_output.txt
+          # iai-callgrind exits 0 even when regression; preserve that.
+          exit ${PIPESTATUS[0]}
+
+      # ── Upload baseline artifact after a successful main run ───────────────
+
+      - name: Upload IAI baseline artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: iai-baselines
+          # Upload only the lightweight .json summaries and baseline dirs;
+          # the heavy callgrind *.out binary files are not needed for diffing.
+          path: |
+            target/iai/**/*.json
+            target/iai/**/baselines/**
+          retention-days: 90
+          overwrite: true
+
+      # ── Parse output and post PR comment ───────────────────────────────────
+
+      - name: Format IAI results for PR comment
+        if: github.event_name == 'pull_request'
+        id: iai_results
+        run: |
+          python3 - <<'PYEOF' > iai_comment.md
+          import re, pathlib
+
+          raw = pathlib.Path("iai_output.txt").read_text(errors="replace")
+
+          # Strip ANSI escape codes
+          ansi = re.compile(r'\x1b\[[0-9;]*m')
+          text = ansi.sub("", raw)
+
+          # iai-callgrind output looks like (one block per benchmark):
+          #
+          #   phonopaper_rs::bench_foo::realistic
+          #     Instructions:  1234567 (No Change)
+          #     Instructions:  1234567|1200000 (+2.89%|+34567)
+          #
+          # We parse each benchmark header and its Instructions line.
+
+          bench_re = re.compile(
+              r'^(?P<name>\S[^\n]+?)\s*$', re.MULTILINE
+          )
+          instr_re = re.compile(
+              r'Instructions:\s*'
+              r'(?P<new>[\d,]+)'          # new value
+              r'(?:\|(?P<old>[\d,]+)'     # optional old value
+              r'\s*\((?P<pct>[^)]+)\))?'  # optional (pct|abs)
+          )
+
+          def num(s):
+              return int(s.replace(",", "").replace(" ", "")) if s else None
+
+          # Split into per-benchmark sections by the double-newline pattern
+          # iai-callgrind uses between benchmarks.
+          sections = re.split(r'\n(?=\S)', text)
+
+          rows = []
+          for sec in sections:
+              lines_s = sec.strip().splitlines()
+              if not lines_s:
+                  continue
+              header = lines_s[0].strip()
+              # Skip lines that look like cargo output, not benchmark IDs
+              if header.startswith(("Compiling", "Finished", "Running", "warning", "error", "  ")):
+                  continue
+              m = instr_re.search(sec)
+              if not m:
+                  continue
+              new_val = num(m.group("new"))
+              old_val = num(m.group("old")) if m.group("old") else None
+              pct_str = m.group("pct") if m.group("pct") else None
+
+              if old_val is not None and pct_str is not None:
+                  diff = new_val - old_val
+                  # Fewer instructions = improvement
+                  if diff < 0:
+                      icon = "📈"
+                  elif diff > 0:
+                      icon = "📉"
+                  else:
+                      icon = "➡️"
+                  delta_cell = f"{icon} {pct_str}"
+                  old_cell   = f"{old_val:,}"
+              else:
+                  delta_cell = "_(no baseline)_"
+                  old_cell   = "—"
+
+              rows.append((header, f"{new_val:,}", old_cell, delta_cell))
+
+          out = ["## IAI-Callgrind benchmark results\n"]
+          if rows:
+              out.append("| Benchmark | Instructions (PR) | Instructions (base) | Δ |")
+              out.append("|---|---:|---:|:---|")
+              for name, new, old, delta in rows:
+                  out.append(f"| `{name}` | {new} | {old} | {delta} |")
+          else:
+              out.append("_No benchmark results found in output._")
+
+          print("\n".join(out))
+          PYEOF
+
+          echo "comment_body<<EOF" >> "$GITHUB_OUTPUT"
+          cat iai_comment.md      >> "$GITHUB_OUTPUT"
+          echo "EOF"              >> "$GITHUB_OUTPUT"
+
+      - name: Post IAI results as PR comment
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: iai-callgrind
+          message: ${{ steps.iai_results.outputs.comment_body }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

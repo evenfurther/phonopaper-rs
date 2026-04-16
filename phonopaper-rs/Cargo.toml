@@ -45,6 +45,9 @@ features = ["derive"]
 version = "0.8"
 features = ["html_reports"]
 
+[dev-dependencies.iai-callgrind]
+version = "0.16"
+
 [[example]]
 name = "bench_decode"
 
@@ -66,4 +69,12 @@ harness = false
 
 [[bench]]
 name = "encode"
+harness = false
+
+[[bench]]
+name = "decode_iai"
+harness = false
+
+[[bench]]
+name = "encode_iai"
 harness = false
