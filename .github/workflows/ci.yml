@@ -1,0 +1,159 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable + rustfmt)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --check --all
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run Clippy (pedantic, all targets)
+        run: cargo clippy --workspace --all-targets
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --workspace
+
+  bench-criterion:
+    name: Criterion benchmarks (smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run Criterion benchmarks
+        # Run with a very short warm-up and measurement time just to verify
+        # the benchmarks compile and execute without errors.  Timing accuracy
+        # is not expected in CI; use the local baselines in AGENTS.md for that.
+        run: |
+          cargo bench -p phonopaper-rs \
+            --bench decode \
+            --bench encode \
+            -- --warm-up-time 1 --measurement-time 2
+
+  bench-iai:
+    name: IAI-Callgrind benchmarks
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+
+      - name: Install iai-callgrind-runner
+        run: |
+          IAI_VERSION=$(cargo metadata --format-version 1 \
+            | python3 -c "
+          import sys, json
+          meta = json.load(sys.stdin)
+          for pkg in meta['packages']:
+              if pkg['name'] == 'iai-callgrind':
+                  print(pkg['version'])
+                  break
+          ")
+          cargo install iai-callgrind-runner --version "$IAI_VERSION"
+
+      - name: Run IAI-Callgrind benchmarks
+        run: |
+          cargo bench -p phonopaper-rs \
+            --bench decode_iai \
+            --bench encode_iai
+
+      - name: Format IAI results for PR comment
+        if: github.event_name == 'pull_request'
+        id: iai_results
+        run: |
+          # Collect all .json summary files written by iai-callgrind under
+          # target/iai and convert them to a readable Markdown table.
+          python3 - <<'PYEOF' > iai_comment.md
+          import os, json, pathlib, textwrap
+
+          results_dir = pathlib.Path("target/iai/phonopaper-rs")
+          lines = ["## IAI-Callgrind benchmark results\n"]
+          lines.append("| Benchmark | Instructions | L1 hits | L2 hits | RAM hits |")
+          lines.append("|---|---:|---:|---:|---:|")
+
+          found = False
+          for summary in sorted(results_dir.rglob("*.json")):
+              try:
+                  data = json.loads(summary.read_text())
+              except Exception:
+                  continue
+              name = data.get("id", summary.stem)
+              stats = data.get("callgrind_summary", {})
+              ir   = stats.get("instructions_executed",   {}).get("new", "—")
+              l1   = stats.get("l1_hits",                 {}).get("new", "—")
+              l2   = stats.get("l2_hits",                 {}).get("new", "—")
+              ram  = stats.get("ram_hits",                {}).get("new", "—")
+              lines.append(f"| `{name}` | {ir:,} | {l1:,} | {l2:,} | {ram:,} |".replace(",", " ") if isinstance(ir, int) else f"| `{name}` | {ir} | {l1} | {l2} | {ram} |")
+              found = True
+
+          if not found:
+              lines.append("| *(no results found)* | — | — | — | — |")
+
+          print("\n".join(lines))
+          PYEOF
+
+          echo "comment_body<<EOF" >> "$GITHUB_OUTPUT"
+          cat iai_comment.md      >> "$GITHUB_OUTPUT"
+          echo "EOF"              >> "$GITHUB_OUTPUT"
+
+      - name: Post IAI results as PR comment
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: iai-callgrind
+          message: ${{ steps.iai_results.outputs.comment_body }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

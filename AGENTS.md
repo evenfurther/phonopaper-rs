@@ -15,7 +15,7 @@ phonopaper-rs/           ← repo root (workspace)
 │   ├── Cargo.toml
 │   ├── src/
 │   ├── tests/           ← integration tests + fixtures
-│   ├── benches/         ← Criterion benchmarks
+│   ├── benches/         ← Criterion and IAI-Callgrind benchmarks
 │   └── examples/        ← developer / research examples
 └── phonopaper-cli/      ← binary crate (cargo install phonopaper-cli)
     ├── Cargo.toml
@@ -67,7 +67,13 @@ cargo test --workspace
 
 # 4. Benchmarks — run the criterion benchmarks to detect heavy regressions
 #    (benches live only in the phonopaper-rs library crate)
-cargo bench -p phonopaper-rs
+cargo bench -p phonopaper-rs --bench decode --bench encode
+
+# 4a. IAI-Callgrind benchmarks — deterministic instruction-count measurements
+#     Requires valgrind and the matching iai-callgrind-runner to be installed:
+#       cargo install iai-callgrind-runner
+#     Then run:
+cargo bench -p phonopaper-rs --bench decode_iai --bench encode_iai
 
 # 5. Coverage — no file may drop below its baseline (see Coverage section below)
 cargo llvm-cov -p phonopaper-rs --tests --ignore-filename-regex='(benches|examples)' --summary-only

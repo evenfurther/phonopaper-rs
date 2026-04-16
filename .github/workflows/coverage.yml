@@ -1,0 +1,92 @@
+name: Coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    name: Code coverage
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # llvm-tools-preview is required by cargo-llvm-cov
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Run coverage
+        run: |
+          cargo llvm-cov \
+            -p phonopaper-rs \
+            --tests \
+            --ignore-filename-regex='(benches|examples)' \
+            --json \
+            --output-path lcov.json
+
+      - name: Generate coverage summary
+        id: coverage
+        run: |
+          python3 - <<'PYEOF' > coverage_comment.md
+          import json, pathlib, sys
+
+          data   = json.loads(pathlib.Path("lcov.json").read_text())
+          totals = data["data"][0]["totals"]
+
+          def pct(d):
+              return f"{d['percent']:.2f} %"
+
+          rows = []
+          for f in sorted(data["data"][0]["files"], key=lambda x: x["filename"]):
+              fname = f["filename"].split("src/")[-1]
+              s = f["summary"]
+              rows.append(
+                  f"| `{fname}` "
+                  f"| {pct(s['regions'])} "
+                  f"| {pct(s['functions'])} "
+                  f"| {pct(s['lines'])} |"
+              )
+
+          t = totals
+          lines = [
+              "## Coverage report\n",
+              "| File | Regions | Functions | Lines |",
+              "|---|---:|---:|---:|",
+              *rows,
+              f"| **TOTAL** | **{pct(t['regions'])}** | **{pct(t['functions'])}** | **{pct(t['lines'])}** |",
+          ]
+          print("\n".join(lines))
+          PYEOF
+
+          echo "comment_body<<EOF" >> "$GITHUB_OUTPUT"
+          cat coverage_comment.md >> "$GITHUB_OUTPUT"
+          echo "EOF"              >> "$GITHUB_OUTPUT"
+
+      - name: Post coverage as PR comment
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: coverage
+          message: ${{ steps.coverage.outputs.comment_body }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-json
+          path: lcov.json
+          retention-days: 14
