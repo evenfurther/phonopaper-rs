@@ -163,11 +163,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: iai-baselines
-          # Upload only the lightweight .json summaries and baseline dirs;
-          # the heavy callgrind *.out binary files are not needed for diffing.
-          path: |
-            target/iai/**/*.json
-            target/iai/**/baselines/**
+          # Upload the full target/iai/ tree. iai-callgrind needs the
+          # callgrind .out files inside baselines/<name>/ to perform the
+          # diff on the next PR run; glob-filtering them out causes an
+          # empty artifact and a missing-artifact warning on download.
+          path: target/iai/
           retention-days: 90
           overwrite: true
 
