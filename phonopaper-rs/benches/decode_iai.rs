@@ -110,7 +110,7 @@ fn setup_synth_all_bins() -> (Synthesizer<512>, Vec<f32>, [f32; 512]) {
 #[bench::all_bins(setup_synth_all_bins())]
 fn bench_synthesizer_column((mut synth, amps, mut pcm): (Synthesizer<512>, Vec<f32>, [f32; 512])) {
     synth.synthesize_column(black_box(&amps), black_box(&mut pcm));
-    black_box(pcm);
+    black_box(&pcm);
 }
 
 // ─── column_amplitudes_from_image ─────────────────────────────────────────────
