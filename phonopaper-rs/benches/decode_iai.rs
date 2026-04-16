@@ -82,7 +82,7 @@ fn bench_spectrogram_to_audio((spec, mut out): (SpectrogramVec, Vec<f32>)) {
 
 // ─── Synthesizer::synthesize_column ──────────────────────────────────────────
 
-fn setup_synth_realistic() -> (Synthesizer<512>, Vec<f32>, Vec<f32>) {
+fn setup_synth_realistic() -> (Synthesizer<512>, Vec<f32>, [f32; 512]) {
     let amps = make_amplitudes(8, 0.8);
     let opts = realistic_opts();
     let mut synth = Synthesizer::<512>::new(opts);
@@ -91,10 +91,10 @@ fn setup_synth_realistic() -> (Synthesizer<512>, Vec<f32>, Vec<f32>) {
     for _ in 0..10 {
         synth.synthesize_column(&amps, &mut pcm);
     }
-    (synth, amps, pcm.to_vec())
+    (synth, amps, pcm)
 }
 
-fn setup_synth_all_bins() -> (Synthesizer<512>, Vec<f32>, Vec<f32>) {
+fn setup_synth_all_bins() -> (Synthesizer<512>, Vec<f32>, [f32; 512]) {
     let amps = make_amplitudes(1, 1.0);
     let opts = realistic_opts();
     let mut synth = Synthesizer::<512>::new(opts);
@@ -102,17 +102,15 @@ fn setup_synth_all_bins() -> (Synthesizer<512>, Vec<f32>, Vec<f32>) {
     for _ in 0..10 {
         synth.synthesize_column(&amps, &mut pcm);
     }
-    (synth, amps, pcm.to_vec())
+    (synth, amps, pcm)
 }
 
 #[library_benchmark]
 #[bench::realistic(setup_synth_realistic())]
 #[bench::all_bins(setup_synth_all_bins())]
-fn bench_synthesizer_column((mut synth, amps, mut pcm): (Synthesizer<512>, Vec<f32>, Vec<f32>)) {
-    let mut pcm_arr = [0.0_f32; 512];
-    pcm_arr.copy_from_slice(&pcm[..512]);
-    synth.synthesize_column(black_box(&amps), black_box(&mut pcm_arr));
-    pcm[..512].copy_from_slice(&pcm_arr);
+fn bench_synthesizer_column((mut synth, amps, mut pcm): (Synthesizer<512>, Vec<f32>, [f32; 512])) {
+    synth.synthesize_column(black_box(&amps), black_box(&mut pcm));
+    black_box(pcm);
 }
 
 // ─── column_amplitudes_from_image ─────────────────────────────────────────────
