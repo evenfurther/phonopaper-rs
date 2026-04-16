@@ -1,0 +1,183 @@
+name: Coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  merge_group:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  coverage:
+    name: Code coverage
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Run coverage
+        run: |
+          cargo llvm-cov \
+            -p phonopaper-rs \
+            --tests \
+            --ignore-filename-regex='(benches|examples)' \
+            --json \
+            --output-path lcov.json
+
+      # ── On push to main: publish the fresh result as the new baseline ──────
+
+      - name: Upload coverage baseline artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-baseline
+          path: lcov.json
+          retention-days: 90
+          overwrite: true
+
+      # ── On PRs: download the baseline produced by the last main push ───────
+
+      - name: Download coverage baseline
+        if: github.event_name == 'pull_request'
+        id: baseline
+        uses: dawidd6/action-download-artifact@v9
+        with:
+          name: coverage-baseline
+          branch: ${{ github.base_ref }}
+          workflow: coverage.yml
+          event: push
+          if_no_artifact_found: warn
+          path: baseline
+
+      # ── Generate the comment (diff if baseline exists, absolute otherwise) ─
+
+      - name: Generate coverage comment
+        if: github.event_name == 'pull_request'
+        id: coverage
+        run: |
+          python3 - <<'PYEOF' > coverage_comment.md
+          import json, os, pathlib
+
+          def pct(d):
+              return d["percent"]
+
+          def fmt(v):
+              return f"{v:.2f} %"
+
+          def delta(new, old):
+              d = new - old
+              icon = "📈" if d > 0 else ("📉" if d < 0 else "➡️")
+              sign = "+" if d >= 0 else ""
+              return f"{icon} {sign}{d:.2f} pp"
+
+          pr_data   = json.loads(pathlib.Path("lcov.json").read_text())
+          pr_files  = {
+              f["filename"].split("src/")[-1]: f["summary"]
+              for f in pr_data["data"][0]["files"]
+          }
+          pr_totals = pr_data["data"][0]["totals"]
+
+          baseline_path = pathlib.Path("baseline/lcov.json")
+          has_baseline  = baseline_path.exists()
+
+          if has_baseline:
+              base_data   = json.loads(baseline_path.read_text())
+              base_files  = {
+                  f["filename"].split("src/")[-1]: f["summary"]
+                  for f in base_data["data"][0]["files"]
+              }
+              base_totals = base_data["data"][0]["totals"]
+
+          header = "## Coverage report\n"
+
+          if has_baseline:
+              header += "\n_Comparing PR branch against `main` baseline._\n"
+              cols = "| File | Regions | Δ | Functions | Δ | Lines | Δ |"
+              sep  = "|---|---:|:---|---:|:---|---:|:---|"
+          else:
+              header += "\n> ⚠️ No baseline found for `main` — showing absolute values only.\n"
+              cols = "| File | Regions | Functions | Lines |"
+              sep  = "|---|---:|---:|---:|"
+
+          lines = [header, cols, sep]
+
+          for fname in sorted(pr_files):
+              s = pr_files[fname]
+              r, fn, ln = pct(s["regions"]), pct(s["functions"]), pct(s["lines"])
+              if has_baseline and fname in base_files:
+                  bs = base_files[fname]
+                  br, bfn, bln = pct(bs["regions"]), pct(bs["functions"]), pct(bs["lines"])
+                  lines.append(
+                      f"| `{fname}` "
+                      f"| {fmt(r)} | {delta(r, br)} "
+                      f"| {fmt(fn)} | {delta(fn, bfn)} "
+                      f"| {fmt(ln)} | {delta(ln, bln)} |"
+                  )
+              elif has_baseline:
+                  # new file — no baseline row
+                  lines.append(
+                      f"| `{fname}` "
+                      f"| {fmt(r)} | _(new)_ "
+                      f"| {fmt(fn)} | _(new)_ "
+                      f"| {fmt(ln)} | _(new)_ |"
+                  )
+              else:
+                  lines.append(
+                      f"| `{fname}` | {fmt(r)} | {fmt(fn)} | {fmt(ln)} |"
+                  )
+
+          # Totals row
+          r, fn, ln = pct(pr_totals["regions"]), pct(pr_totals["functions"]), pct(pr_totals["lines"])
+          if has_baseline:
+              br  = pct(base_totals["regions"])
+              bfn = pct(base_totals["functions"])
+              bln = pct(base_totals["lines"])
+              lines.append(
+                  f"| **TOTAL** "
+                  f"| **{fmt(r)}** | {delta(r, br)} "
+                  f"| **{fmt(fn)}** | {delta(fn, bfn)} "
+                  f"| **{fmt(ln)}** | {delta(ln, bln)} |"
+              )
+          else:
+              lines.append(
+                  f"| **TOTAL** | **{fmt(r)}** | **{fmt(fn)}** | **{fmt(ln)}** |"
+              )
+
+          print("\n".join(lines))
+          PYEOF
+
+          echo "comment_body<<EOF" >> "$GITHUB_OUTPUT"
+          cat coverage_comment.md >> "$GITHUB_OUTPUT"
+          echo "EOF"              >> "$GITHUB_OUTPUT"
+
+      - name: Post coverage comment on PR
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: coverage
+          message: ${{ steps.coverage.outputs.comment_body }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload coverage artifact (PR run, for debugging)
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-pr-${{ github.event.pull_request.number }}
+          path: lcov.json
+          retention-days: 14

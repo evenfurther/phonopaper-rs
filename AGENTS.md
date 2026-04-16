@@ -11,11 +11,15 @@ This repository is a Cargo **workspace** with two member crates:
 phonopaper-rs/           ← repo root (workspace)
 ├── Cargo.toml           ← [workspace] manifest
 ├── .cargo/config.toml   ← target-cpu=native
+├── .github/
+│   └── workflows/
+│       ├── ci.yml       ← fmt, clippy, test, Criterion smoke, IAI benchmarks
+│       └── coverage.yml ← cargo-llvm-cov, posts diff comment on PRs
 ├── phonopaper-rs/       ← library crate (published to crates.io)
 │   ├── Cargo.toml
 │   ├── src/
 │   ├── tests/           ← integration tests + fixtures
-│   ├── benches/         ← Criterion benchmarks
+│   ├── benches/         ← Criterion and IAI-Callgrind benchmarks
 │   └── examples/        ← developer / research examples
 └── phonopaper-cli/      ← binary crate (cargo install phonopaper-cli)
     ├── Cargo.toml
@@ -44,10 +48,8 @@ All changes must be committed using **jujutsu (`jj`)**, not `git` directly.
   made, not just *what* changed.
 - Do not use `git commit`, `git add`, or `git push` — jujutsu manages the
   working-copy and history directly.
-- After every commit, advance the `main` bookmark to the new commit:
-  ```bash
-  jj bookmark set main -r @-
-  ```
+- Do not advance the `main` bookmark manually; changes reach `main` exclusively
+  through pull requests merged via the GitHub merge queue.
 
 ## Required checks before finishing any task
 
@@ -67,7 +69,13 @@ cargo test --workspace
 
 # 4. Benchmarks — run the criterion benchmarks to detect heavy regressions
 #    (benches live only in the phonopaper-rs library crate)
-cargo bench -p phonopaper-rs
+cargo bench -p phonopaper-rs --bench decode --bench encode
+
+# 4a. IAI-Callgrind benchmarks — deterministic instruction-count measurements
+#     Requires valgrind and the matching iai-callgrind-runner to be installed:
+#       cargo install iai-callgrind-runner
+#     Then run:
+cargo bench -p phonopaper-rs --bench decode_iai --bench encode_iai
 
 # 5. Coverage — no file may drop below its baseline (see Coverage section below)
 cargo llvm-cov -p phonopaper-rs --tests --ignore-filename-regex='(benches|examples)' --summary-only
