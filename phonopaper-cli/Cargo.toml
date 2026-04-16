@@ -17,7 +17,7 @@ name = "phonopaper"
 path = "src/main.rs"
 
 [dependencies]
-phonopaper-rs = { path = "../phonopaper-rs" }
+phonopaper-rs = { path = "../phonopaper-rs", version = "0.1.0" }
 image = "0.25"
 imageproc = "0.26.1"
 pdf-writer = "0.14"

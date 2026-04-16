@@ -79,6 +79,9 @@ cargo bench -p phonopaper-rs --bench decode_iai --bench encode_iai
 
 # 5. Coverage — no file may drop below its baseline (see Coverage section below)
 cargo llvm-cov -p phonopaper-rs --tests --ignore-filename-regex='(benches|examples)' --summary-only
+
+# 6. Check that the version of the path dependency from `phonopaper-cli` to `phonopaper-rs`
+#    matches the version number in the toplevel `Cargo.toml`.
 ```
 
 Run them in this order. Fix any issues before considering the task done.
