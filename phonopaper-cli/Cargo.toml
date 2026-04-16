@@ -1,0 +1,28 @@
+[package]
+name = "phonopaper-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command-line tool to encode and decode audio in the PhonoPaper format."
+keywords = ["phonopaper", "audio", "spectrogram", "cli"]
+categories = ["command-line-utilities", "multimedia::audio"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "phonopaper"
+path = "src/main.rs"
+
+[dependencies]
+phonopaper-rs = { path = "../phonopaper-rs" }
+image = "0.25"
+imageproc = "0.26.1"
+pdf-writer = "0.14"
+color-eyre = "0.6"
+
+[dependencies.clap]
+version = "4"
+features = ["derive"]

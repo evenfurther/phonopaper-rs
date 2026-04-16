@@ -1,0 +1,69 @@
+[package]
+name = "phonopaper-rs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Encode and decode audio in the PhonoPaper format — a printable grayscale spectrogram readable by a phone camera."
+keywords = ["phonopaper", "audio", "spectrogram", "encode", "decode"]
+categories = ["multimedia::audio", "encoding"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# Image loading and saving (PNG, JPEG)
+image = "0.25"
+# WAV file reading and writing
+hound = "3.5"
+# FFT for audio analysis (WAV → spectrogram)
+rustfft = "6.4"
+# Convenience for numeric operations
+num-complex = "0.4"
+# Step-by-step PDF writer (for vector::spectrogram_to_pdf)
+pdf-writer = "0.14"
+# Deflate compression for embedding rasters in PDF XObjects
+miniz_oxide = "0.9"
+# Base64 encoding/decoding for SVG data URIs
+base64 = "0.22"
+# Derive macros for the error type
+thiserror = "2"
+# MP3 decoding — only the mp3 codec bundle, no other formats
+symphonia = { version = "0.5.5", default-features = false, features = ["mp3"] }
+
+[dev-dependencies]
+imageproc = "0.26.1"
+nalgebra = "0.34.2"
+tempfile = "3"
+
+[dev-dependencies.clap]
+version = "4"
+features = ["derive"]
+
+[dev-dependencies.criterion]
+version = "0.8"
+features = ["html_reports"]
+
+[[example]]
+name = "bench_decode"
+
+[[example]]
+name = "gen_sines"
+
+[[example]]
+name = "compare_android"
+
+[[example]]
+name = "robust_decode"
+
+[[example]]
+name = "angine"
+
+[[bench]]
+name = "decode"
+harness = false
+
+[[bench]]
+name = "encode"
+harness = false
