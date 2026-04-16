@@ -13,7 +13,7 @@ phonopaper-rs/           ← repo root (workspace)
 ├── .cargo/config.toml   ← target-cpu=native
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml       ← fmt, clippy, test, Criterion smoke, IAI benchmarks
+│       ├── ci.yml       ← fmt, clippy, test, IAI benchmarks
 │       └── coverage.yml ← cargo-llvm-cov, posts diff comment on PRs
 ├── phonopaper-rs/       ← library crate (published to crates.io)
 │   ├── Cargo.toml

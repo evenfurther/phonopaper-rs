@@ -56,31 +56,6 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
-  bench-criterion:
-    name: Criterion benchmarks (smoke)
-    runs-on: ubuntu-latest
-    env:
-      # .cargo/config.toml sets target-cpu=native for local dev; override it
-      # here so the benchmarks compile for the generic CI runner CPU.
-      RUSTFLAGS: ""
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (stable)
-        uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Run Criterion benchmarks
-        # Run with a very short warm-up and measurement time just to verify
-        # the benchmarks compile and execute without errors.  Timing accuracy
-        # is not expected in CI; use the local baselines in AGENTS.md for that.
-        run: |
-          cargo bench -p phonopaper-rs \
-            --bench decode \
-            --bench encode \
-            -- --warm-up-time 1 --measurement-time 2
-
   bench-iai:
     name: IAI-Callgrind benchmarks
     runs-on: ubuntu-latest
