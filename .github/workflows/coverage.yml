@@ -44,7 +44,7 @@ jobs:
 
       - name: Upload coverage baseline artifact
         if: github.event_name == 'push'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-baseline
           path: lcov.json
@@ -176,7 +176,7 @@ jobs:
 
       - name: Upload coverage artifact (PR run, for debugging)
         if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-pr-${{ github.event.pull_request.number }}
           path: lcov.json
