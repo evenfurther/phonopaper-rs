@@ -49,6 +49,8 @@ For a detailed technical description see [`PHONOPAPER_SPEC.md`](PHONOPAPER_SPEC.
 
 ### Installation
 
+From this repository:
+
 ```bash
 cargo install --path phonopaper-cli
 ```
@@ -57,6 +59,12 @@ Or run directly from the workspace:
 
 ```bash
 cargo run -p phonopaper-cli -- <subcommand> [options]
+```
+
+Or, if you want to install the released version:
+
+```bash
+cargo install phonopaper-cli
 ```
 
 ### `decode` — image → WAV
@@ -192,7 +200,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-phonopaper-rs = { path = "/path/to/phonopaper-rs/phonopaper-rs" }
+phonopaper-rs = "0.1.0"
 ```
 
 > The crate name on disk is `phonopaper-rs`; the Rust module name is

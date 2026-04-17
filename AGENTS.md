@@ -81,7 +81,8 @@ cargo bench -p phonopaper-rs --bench decode_iai --bench encode_iai
 cargo llvm-cov -p phonopaper-rs --tests --ignore-filename-regex='(benches|examples)' --summary-only
 
 # 6. Check that the version of the path dependency from `phonopaper-cli` to `phonopaper-rs`
-#    matches the version number in the toplevel `Cargo.toml`.
+#    matches the version number in the toplevel `Cargo.toml`. Also check that it matches the
+#    one given in the `README.md` file wrt "Library usage".
 ```
 
 Run them in this order. Fix any issues before considering the task done.
