@@ -168,7 +168,7 @@ jobs:
 
       - name: Post coverage comment on PR
         if: github.event_name == 'pull_request'
-        uses: marocchino/sticky-pull-request-comment@v2
+        uses: marocchino/sticky-pull-request-comment@v3.0.4
         with:
           header: coverage
           message: ${{ steps.coverage.outputs.comment_body }}
