@@ -96,7 +96,7 @@ jobs:
       - name: Download IAI baseline
         if: github.event_name == 'pull_request'
         id: iai_baseline
-        uses: dawidd6/action-download-artifact@v20
+        uses: dawidd6/action-download-artifact@v21
         with:
           name: iai-baselines
           branch: ${{ github.base_ref }}
