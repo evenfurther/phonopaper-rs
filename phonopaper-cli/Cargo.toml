@@ -20,7 +20,7 @@ path = "src/main.rs"
 phonopaper-rs = { path = "../phonopaper-rs", version = "0.1.0" }
 image = "0.25"
 imageproc = "0.26.1"
-pdf-writer = "0.14"
+pdf-writer = "0.15"
 color-eyre = "0.6"
 
 [dependencies.clap]
