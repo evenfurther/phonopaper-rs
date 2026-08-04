@@ -26,7 +26,7 @@ pdf-writer = "0.14"
 # Deflate compression for embedding rasters in PDF XObjects
 miniz_oxide = "0.9"
 # Base64 encoding/decoding for SVG data URIs
-base64 = "0.22"
+base64 = "0.23"
 # Derive macros for the error type
 thiserror = "2"
 # MP3 decoding — only the mp3 codec bundle, no other formats
