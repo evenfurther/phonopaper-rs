@@ -30,7 +30,7 @@ base64 = "0.22"
 # Derive macros for the error type
 thiserror = "2"
 # MP3 decoding — only the mp3 codec bundle, no other formats
-symphonia = { version = "0.5.5", default-features = false, features = ["mp3"] }
+symphonia = { version = "0.6.0", default-features = false, features = ["mp3"] }
 
 [dev-dependencies]
 imageproc = "0.26.1"
