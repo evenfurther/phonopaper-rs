@@ -33,7 +33,7 @@ thiserror = "2"
 symphonia = { version = "0.5.5", default-features = false, features = ["mp3"] }
 
 [dev-dependencies]
-imageproc = "0.26.1"
+imageproc = "0.27.0"
 nalgebra = "0.34.2"
 tempfile = "3"
 
