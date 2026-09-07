@@ -22,7 +22,7 @@ rustfft = "6.4"
 # Convenience for numeric operations
 num-complex = "0.4"
 # Step-by-step PDF writer (for vector::spectrogram_to_pdf)
-pdf-writer = "0.14"
+pdf-writer = "0.15"
 # Deflate compression for embedding rasters in PDF XObjects
 miniz_oxide = "0.9"
 # Base64 encoding/decoding for SVG data URIs
