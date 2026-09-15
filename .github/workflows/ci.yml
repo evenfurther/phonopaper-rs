@@ -29,6 +29,8 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v7
 
@@ -45,6 +47,8 @@ jobs:
   test:
     name: Tests
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v7
 
