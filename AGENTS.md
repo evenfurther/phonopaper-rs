@@ -190,7 +190,8 @@ accompanying tests will lower the numbers and must be caught before merging.
 | Location | Reason |
 |---|---|
 | `audio.rs` — `read_mp3` `ResetRequired` branch | Signals a decoder reset at a seek point; unreachable when decoding a plain MP3 file from start to finish without seeking. |
-| `audio.rs` — `read_mp3` multi-track skip branch | `packet.track_id() != track_id` guard; unreachable because `symphonia-bundle-mp3` produces a single-track stream for any valid MPEG file. |
+| `audio.rs` — `read_mp3` multi-track skip branch | `packet.track_id != track_id` guard; unreachable because `symphonia-bundle-mp3` produces a single-track stream for any valid MPEG file. |
+| `audio.rs` — `read_mp3` missing-codec-params guard | `let Some(CodecParameters::Audio(…)) … else` fallback; unreachable because `default_track(TrackType::Audio)` only returns tracks whose `codec_params` is `Some(CodecParameters::Audio)`. |
 | `decode/wav.rs:30-33` | Sample-buffer > 4 GiB overflow guard; untestable in practice. |
 | `decode/synth.rs:322,578,579` | `assert_eq!` format-string arguments; only reachable on panic, not normal test flow. |
 | `decode/synth.rs:428-430` | Zero-phasor reset branch in `renormalize()`; unreachable because phasors are unit-complex numbers that can only drift to zero under extreme floating-point pathology, not in normal synthesis. |

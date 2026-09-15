@@ -81,12 +81,12 @@ fn read_wav(path: &Path) -> Result<(Vec<f32>, u32)> {
 /// Returns [`PhonoPaperError::InvalidFormat`] if the file cannot be probed,
 /// no audio track is found, or decoding fails.
 fn read_mp3(path: &Path) -> Result<(Vec<f32>, u32)> {
-    use symphonia::core::audio::SampleBuffer;
-    use symphonia::core::codecs::DecoderOptions;
-    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::codecs::CodecParameters;
+    use symphonia::core::codecs::audio::AudioDecoderOptions;
+    use symphonia::core::formats::probe::Hint;
+    use symphonia::core::formats::{FormatOptions, TrackType};
     use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions};
     use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
 
     // Open the file as a MediaSource.
     let file = std::fs::File::open(path).map_err(PhonoPaperError::IoError)?;
@@ -103,23 +103,26 @@ fn read_mp3(path: &Path) -> Result<(Vec<f32>, u32)> {
 
     // Probe the stream to identify the container format.
     let probe = symphonia::default::get_probe();
-    let probe_result = probe
-        .format(
+    let mut format = probe
+        .probe(
             &hint,
             mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
+            FormatOptions::default(),
+            MetadataOptions::default(),
         )
         .map_err(|e| PhonoPaperError::InvalidFormat(format!("Failed to probe audio file: {e}")))?;
-    let mut format = probe_result.format;
 
     // Find the default audio track.
-    let track = format.default_track().ok_or_else(|| {
+    let track = format.default_track(TrackType::Audio).ok_or_else(|| {
         PhonoPaperError::InvalidFormat("No audio track found in file".to_string())
     })?;
 
     let track_id = track.id;
-    let codec_params = track.codec_params.clone();
+    let Some(CodecParameters::Audio(codec_params)) = track.codec_params.clone() else {
+        return Err(PhonoPaperError::InvalidFormat(
+            "Audio track has no codec parameters".to_string(),
+        ));
+    };
 
     let sample_rate = codec_params.sample_rate.ok_or_else(|| {
         PhonoPaperError::InvalidFormat("Audio track has no sample rate".to_string())
@@ -127,26 +130,23 @@ fn read_mp3(path: &Path) -> Result<(Vec<f32>, u32)> {
 
     let n_channels = codec_params
         .channels
+        .as_ref()
         .map_or(1, symphonia::core::audio::Channels::count);
 
     // Build the decoder.
     let codecs = symphonia::default::get_codecs();
     let mut decoder = codecs
-        .make(&codec_params, &DecoderOptions::default())
+        .make_audio_decoder(&codec_params, &AudioDecoderOptions::default())
         .map_err(|e| PhonoPaperError::InvalidFormat(format!("Failed to create decoder: {e}")))?;
 
     // Decode all packets belonging to this track.
     let mut interleaved: Vec<f32> = Vec::new();
-    let mut sample_buf: Option<SampleBuffer<f32>> = None;
+    let mut sample_buf: Vec<f32> = Vec::new();
 
     loop {
         let packet = match format.next_packet() {
-            Ok(pkt) => pkt,
-            Err(symphonia::core::errors::Error::IoError(e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break; // end of stream
-            }
+            Ok(Some(pkt)) => pkt,
+            Ok(None) => break, // end of stream
             Err(e) => {
                 return Err(PhonoPaperError::InvalidFormat(format!(
                     "Error reading audio packet: {e}"
@@ -155,7 +155,7 @@ fn read_mp3(path: &Path) -> Result<(Vec<f32>, u32)> {
         };
 
         // Skip packets that belong to other tracks.
-        if packet.track_id() != track_id {
+        if packet.track_id != track_id {
             continue;
         }
 
@@ -171,12 +171,8 @@ fn read_mp3(path: &Path) -> Result<(Vec<f32>, u32)> {
             }
         };
 
-        // Initialise the SampleBuffer on the first decoded frame.
-        let sb = sample_buf
-            .get_or_insert_with(|| SampleBuffer::<f32>::new(buf.capacity() as u64, *buf.spec()));
-
-        sb.copy_interleaved_ref(buf);
-        interleaved.extend_from_slice(sb.samples());
+        buf.copy_to_vec_interleaved(&mut sample_buf);
+        interleaved.extend_from_slice(&sample_buf);
     }
 
     if interleaved.is_empty() {
