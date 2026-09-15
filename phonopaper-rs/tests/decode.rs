@@ -878,12 +878,6 @@ fn spectrogram_get_out_of_bounds_returns_zero() {
     spec.set(1, TOTAL_BINS - 1, 0.3);
 
     // Spectrogram::get returns the literal 0.0f32 for out-of-bounds indices —
-    // not a computed value — so bitwise equality is appropriate here.
-    #[expect(
-        clippy::float_cmp,
-        reason = "Spectrogram::get returns the literal 0.0f32 for out-of-bounds; \
-                  exact bitwise equality is correct and intentional"
-    )]
     {
         // col out of range
         assert_eq!(

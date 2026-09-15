@@ -485,7 +485,7 @@ fn fill_phasor_im(
     let mut ls3 = s3;
 
     // Main loop: groups of 4 samples — all 4 lanes step by z^4 independently.
-    let chunks = ph_im.chunks_exact_mut(4);
+    let (chunks, remainder) = ph_im.as_chunks_mut::<4>();
     for chunk in chunks {
         chunk[0] = ls0;
         chunk[1] = ls1;
@@ -506,7 +506,7 @@ fn fill_phasor_im(
     }
     // Scalar tail for SPS values not divisible by 4 (e.g. SPS=353).
     // With SPS=353, this handles the final 1 sample (353 = 88*4 + 1).
-    for im in ph_im.chunks_exact_mut(4).into_remainder() {
+    for im in remainder {
         *im = ls0;
         let nc = lc0 * rot_c - ls0 * rot_s;
         ls0 = lc0 * rot_s + ls0 * rot_c;
