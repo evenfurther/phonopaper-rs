@@ -262,7 +262,7 @@ fn save_rectified_image(
     path: impl AsRef<Path>,
 ) -> Result<(), String> {
     use image::GenericImageView as _;
-    use imageproc::geometric_transformations::{Interpolation, Projection, warp};
+    use imageproc::geometric_transformations::{Border, Interpolation, Projection, warp};
 
     if col_bounds.len() < 2 {
         return Err("Image too narrow to rectify.".to_string());
@@ -325,9 +325,9 @@ fn save_rectified_image(
     let rgb_input = img.to_rgb8();
     let warped = warp(
         &rgb_input,
-        &projection,
+        projection,
         Interpolation::Bilinear,
-        image::Rgb([255u8, 255, 255]),
+        Border::Constant(image::Rgb([255u8, 255, 255])),
     );
     warped.save(path).map_err(|e| e.to_string())
 }

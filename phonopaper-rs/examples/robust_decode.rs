@@ -44,7 +44,7 @@
 
 use clap::Parser;
 use image::{DynamicImage, GenericImageView as _, Rgba};
-use imageproc::geometric_transformations::{Interpolation, Projection, warp};
+use imageproc::geometric_transformations::{Border, Interpolation, Projection, warp};
 use phonopaper_rs::decode::{
     AmplitudeMode, DataBounds, SynthesisOptions, column_amplitudes_from_image_into,
     detect_markers_at_column, spectrogram_to_audio,
@@ -490,9 +490,9 @@ fn save_rectified_image(
     let rgb_input = image.to_rgb8();
     let warped = warp(
         &rgb_input,
-        &projection,
+        projection,
         Interpolation::Bilinear,
-        image::Rgb([255u8, 255, 255]),
+        Border::Constant(image::Rgb([255u8, 255, 255])),
     );
     warped.save(path).map_err(|e| e.to_string())
 }
