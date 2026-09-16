@@ -183,9 +183,10 @@ fn detect_preview_bounds_array(
         return Ok(ptr::null_mut());
     };
 
-    let top = i32::try_from(top).map_err(|_| "Detected top bound does not fit in JNI.".to_string())?;
-    let bottom =
-        i32::try_from(bottom).map_err(|_| "Detected bottom bound does not fit in JNI.".to_string())?;
+    let top =
+        i32::try_from(top).map_err(|_| "Detected top bound does not fit in JNI.".to_string())?;
+    let bottom = i32::try_from(bottom)
+        .map_err(|_| "Detected bottom bound does not fit in JNI.".to_string())?;
     let output = env.new_int_array(2).map_err(|err| err.to_string())?;
     env.set_int_array_region(&output, 0, &[top, bottom])
         .map_err(|err| err.to_string())?;
