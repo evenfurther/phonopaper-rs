@@ -1,0 +1,19 @@
+[package]
+name = "phonopaper-android"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+image = "0.25"
+jni = "0.21"
+phonopaper-rs = { path = "../phonopaper-rs", version = "0.1.0" }
+
+[lints]
+workspace = true

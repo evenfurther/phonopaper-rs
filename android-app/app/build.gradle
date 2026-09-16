@@ -1,0 +1,93 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+def jniLibsDir = file("$projectDir/src/main/jniLibs")
+def rustManifest = file("${rootDir}/../phonopaper-android/Cargo.toml")
+def rustTargets = ['arm64-v8a', 'armeabi-v7a', 'x86_64']
+
+def rustCommand = { releaseBuild ->
+    def command = ['cargo', 'ndk']
+    rustTargets.each { abi ->
+        command += ['-t', abi]
+    }
+    command += ['-o', jniLibsDir.absolutePath, 'build', '--manifest-path', rustManifest.absolutePath]
+    if (releaseBuild) {
+        command += '--release'
+    }
+    command
+}
+
+android {
+    namespace 'com.evenfurther.phonopaper'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.evenfurther.phonopaper'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+        }
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    sourceSets {
+        main {
+            jniLibs.srcDirs = [jniLibsDir]
+        }
+    }
+}
+
+tasks.register('cleanRustJniLibs', Delete) {
+    delete jniLibsDir
+}
+
+tasks.register('buildRustDebug', Exec) {
+    dependsOn tasks.named('cleanRustJniLibs')
+    workingDir rootDir.parentFile
+    commandLine rustCommand(false)
+    doFirst {
+        jniLibsDir.mkdirs()
+    }
+}
+
+tasks.register('buildRustRelease', Exec) {
+    dependsOn tasks.named('cleanRustJniLibs')
+    workingDir rootDir.parentFile
+    commandLine rustCommand(true)
+    doFirst {
+        jniLibsDir.mkdirs()
+    }
+}
+
+tasks.named('preDebugBuild') {
+    dependsOn tasks.named('buildRustDebug')
+}
+
+tasks.named('preReleaseBuild') {
+    dependsOn tasks.named('buildRustRelease')
+}
+
+dependencies {
+    implementation 'androidx.activity:activity-ktx:1.9.2'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.core:core-ktx:1.13.1'
+}
