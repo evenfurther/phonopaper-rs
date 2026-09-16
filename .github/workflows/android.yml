@@ -83,6 +83,8 @@ jobs:
         run: |
           cd phonopaper-android
           ./gradlew assembleRelease
+        env:
+          GRADLE_USER_HOME: ${{ runner.temp }}/gradle-home
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
