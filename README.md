@@ -242,10 +242,10 @@ decode_image_to_wav("code.png", "output.wav", SynthesisOptions::default())?;
 ### Encode an audio file to an image
 
 ```rust
-use phonopaper_rs::encode::{encode_wav_to_image, AnalysisOptions};
+use phonopaper_rs::encode::{encode_audio_to_image, AnalysisOptions};
 use phonopaper_rs::render::RenderOptions;
 
-encode_wav_to_image(
+encode_audio_to_image(
     "input.wav",
     "code.png",
     AnalysisOptions::default(),
@@ -307,12 +307,12 @@ std::fs::write("code.pdf", spectrogram_to_pdf(&spec, &render, PdfPageLayout::Fit
 | Module | Key items |
 |---|---|
 | `phonopaper_rs::error` | `PhonoPaperError`, `Result` |
-| `phonopaper_rs::format` | `TOTAL_BINS`, `OCTAVES`, `SAMPLE_RATE`, `bin_to_freq`, `freq_to_bin` |
+| `phonopaper_rs::format` | `TOTAL_BINS`, `OCTAVES`, `SAMPLE_RATE`, `index_to_freq`, `freq_to_index` |
 | `phonopaper_rs::spectrogram` | `Spectrogram<S>`, `SpectrogramVec`, `SpectrogramBuf`, `SpectrogramBufMut` |
 | `phonopaper_rs::render` | `RenderOptions`, `spectrogram_to_image`, `spectrogram_to_image_buf` |
 | `phonopaper_rs::vector` | `spectrogram_to_svg`, `spectrogram_to_pdf`, `image_from_svg`, `image_from_pdf`, `PdfPageLayout`, `page_size` |
 | `phonopaper_rs::audio` | `read_audio_file` (WAV + MP3 → mono `f32` + sample rate) |
-| `phonopaper_rs::encode` | `AnalysisOptions`, `audio_to_spectrogram`, `encode_wav_to_image` |
+| `phonopaper_rs::encode` | `AnalysisOptions`, `audio_to_spectrogram`, `encode_audio_to_image` |
 | `phonopaper_rs::decode` | `SynthesisOptions`, `AmplitudeMode`, `Synthesizer<SPS>`, `DataBounds`, `detect_markers`, `detect_markers_at_column`, `column_amplitudes_from_image`, `spectrogram_to_audio`, `decode_image_to_wav`, `decode_image_to_wav_sps` |
 
 ---

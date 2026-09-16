@@ -880,21 +880,18 @@ fn spectrogram_get_out_of_bounds_returns_zero() {
     // Spectrogram::get returns the literal 0.0f32 for out-of-bounds indices —
     {
         // col out of range
-        assert_eq!(
-            spec.get(2, 0),
-            0.0,
+        assert!(
+            spec.get(2, 0).abs() <= f32::EPSILON,
             "get with col >= num_columns should return 0.0"
         );
         // bin out of range
-        assert_eq!(
-            spec.get(0, TOTAL_BINS),
-            0.0,
+        assert!(
+            spec.get(0, TOTAL_BINS).abs() <= f32::EPSILON,
             "get with bin >= TOTAL_BINS should return 0.0"
         );
         // both out of range
-        assert_eq!(
-            spec.get(99, 999),
-            0.0,
+        assert!(
+            spec.get(99, 999).abs() <= f32::EPSILON,
             "get with both col and bin out of range should return 0.0"
         );
     }

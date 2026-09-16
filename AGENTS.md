@@ -66,7 +66,7 @@ All changes must be committed using **jujutsu (`jj`)**, not `git` directly.
 
 ## Required checks before finishing any task
 
-Every change must leave the repository in a state where **all five** of the
+Every change must leave the repository in a state where **all six** of the
 following commands pass with zero errors and zero warnings:
 
 ```bash
