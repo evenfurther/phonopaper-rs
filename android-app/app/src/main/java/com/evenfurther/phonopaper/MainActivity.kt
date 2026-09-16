@@ -235,15 +235,16 @@ class MainActivity : AppCompatActivity() {
             cameraStatusText.text = getString(R.string.camera_frame_error)
             return
         }
+        val autoplayEnabled = autoplaySwitch.isChecked
+        val playbackIdle = audioTrack == null
+        val autoplayCooldownElapsed =
+            SystemClock.elapsedRealtime() - lastCameraAutoplayAtMs >= CAMERA_AUTOPLAY_COOLDOWN_MS
 
         cameraExecutor.execute {
             try {
                 val bounds = PhonopaperNative.detectPreviewBounds(bytes)
                 val shouldAutoplay =
-                    bounds != null &&
-                        autoplaySwitch.isChecked &&
-                        audioTrack == null &&
-                        SystemClock.elapsedRealtime() - lastCameraAutoplayAtMs >= CAMERA_AUTOPLAY_COOLDOWN_MS
+                    bounds != null && autoplayEnabled && playbackIdle && autoplayCooldownElapsed
                 val livePcm = if (shouldAutoplay) PhonopaperNative.decodeImageToPcm(bytes) else null
                 runOnUiThread {
                     updateCameraOverlay(bounds, bitmap.height)
@@ -258,10 +259,10 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             } catch (error: Exception) {
-                Log.e(TAG, "Live preview analysis failed", error)
+                Log.w(TAG, "Live preview frame could not be analyzed", error)
                 runOnUiThread {
                     detectionOverlay.clearDetection()
-                    cameraStatusText.text = getString(R.string.camera_searching)
+                    cameraStatusText.text = getString(R.string.camera_frame_error)
                 }
             } finally {
                 cameraFrameInFlight.set(false)

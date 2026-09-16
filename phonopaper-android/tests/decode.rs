@@ -1,4 +1,5 @@
-use phonopaper_android::decode_image_to_pcm;
+use image::{GrayImage, ImageFormat, Luma};
+use phonopaper_android::{decode_image_to_pcm, detect_preview_bounds};
 use phonopaper_rs::{
     SpectrogramVec,
     render::{RenderOptions, spectrogram_to_image},
@@ -29,4 +30,38 @@ fn decode_generated_phonopaper_image() {
 fn reject_invalid_image_bytes() {
     let err = decode_image_to_pcm(b"not an image").expect_err("invalid input should fail");
     assert!(!err.is_empty());
+}
+
+#[test]
+fn detect_preview_bounds_generated_phonopaper_image() {
+    let mut spectrogram = SpectrogramVec::new(24);
+    for col in 0..spectrogram.num_columns() {
+        spectrogram.set(col, 120, 1.0);
+        if col % 2 == 0 {
+            spectrogram.set(col, 144, 0.5);
+        }
+    }
+
+    let image = spectrogram_to_image(&spectrogram, &RenderOptions::default());
+    let mut png = Vec::new();
+    image
+        .write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)
+        .expect("write PNG test fixture");
+
+    let bounds = detect_preview_bounds(&png)
+        .expect("generated image should be analyzable")
+        .expect("generated image should contain preview bounds");
+    assert!(bounds.0 < bounds.1);
+}
+
+#[test]
+fn detect_preview_bounds_blank_image_returns_none() {
+    let blank = GrayImage::from_pixel(32, 32, Luma([255]));
+    let mut png = Vec::new();
+    blank
+        .write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)
+        .expect("write blank PNG");
+
+    let bounds = detect_preview_bounds(&png).expect("blank PNG is still a valid image");
+    assert_eq!(bounds, None);
 }
