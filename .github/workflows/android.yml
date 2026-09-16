@@ -23,12 +23,10 @@ jobs:
       - name: Install Android SDK and NDK
         uses: android-actions/setup-android@v3
         with:
-          android-sdk-version: '34'
-          ndk-version: '26.2.11394342'
-          cmake-version: '3.10.2'
-      
-      - name: Accept Android SDK licenses
-        run: yes | sdkmanager --sdk_root=${ANDROID_SDK_ROOT} --licenses || true
+          cmdline-tools-version: '12.0'
+          packages: platforms;android-34 build-tools;34.0.0 platform-tools cmake;3.10.2 ndk;26.2.11394342
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
