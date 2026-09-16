@@ -2,6 +2,9 @@
 members = ["phonopaper-rs", "phonopaper-cli", "phonopaper-android"]
 resolver = "3"
 
+[workspace.dependencies]
+image = "0.25"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"

@@ -14,7 +14,7 @@ workspace = true
 
 [dependencies]
 # Image loading and saving (PNG, JPEG)
-image = "0.25"
+image.workspace = true
 # WAV file reading and writing
 hound = "3.5"
 # FFT for audio analysis (WAV → spectrogram)
