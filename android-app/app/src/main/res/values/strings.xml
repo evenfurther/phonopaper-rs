@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">PhonoPaper RS</string>
+    <string name="app_title">PhonoPaper Android prototype</string>
+    <string name="app_subtitle">Pick a `PhonoPaper` image, decode it through the shared Rust library, and play the synthesized audio on-device.</string>
+    <string name="preview_content_description">Selected `PhonoPaper` preview</string>
+    <string name="pick_image">Pick image</string>
+    <string name="play_audio">Play decoded audio</string>
+    <string name="stop_audio">Stop playback</string>
+    <string name="status_idle">Select a `PhonoPaper` image to begin.</string>
+</resources>
