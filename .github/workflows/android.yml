@@ -47,18 +47,18 @@ jobs:
       - name: Build phonopaper-rs for Android
         run: |
           cd phonopaper-rs
-          cargo build --release --target aarch64-linux-android
-          cargo build --release --target armv7-linux-androideabi
-          cargo build --release --target i686-linux-android
-          cargo build --release --target x86_64-linux-android
+          RUSTFLAGS="" cargo build --release --target aarch64-linux-android
+          RUSTFLAGS="" cargo build --release --target armv7-linux-androideabi
+          RUSTFLAGS="" cargo build --release --target i686-linux-android
+          RUSTFLAGS="" cargo build --release --target x86_64-linux-android
 
       - name: Build phonopaper-android library
         run: |
           cd phonopaper-android
-          cargo build --release --target aarch64-linux-android
-          cargo build --release --target armv7-linux-androideabi
-          cargo build --release --target i686-linux-android
-          cargo build --release --target x86_64-linux-android
+          RUSTFLAGS="" cargo build --release --target aarch64-linux-android
+          RUSTFLAGS="" cargo build --release --target armv7-linux-androideabi
+          RUSTFLAGS="" cargo build --release --target i686-linux-android
+          RUSTFLAGS="" cargo build --release --target x86_64-linux-android
 
       - name: Copy native libraries to jniLibs
         run: |
