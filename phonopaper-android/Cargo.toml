@@ -1,0 +1,21 @@
+[package]
+name = "phonopaper-android"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "phonopaper_android"
+crate-type = ["cdylib"]
+
+[dependencies]
+phonopaper-rs = { path = "../phonopaper-rs" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = "0.4"
+android-logger = "0.3"
+jni = "0.21"
+
+[profile.release]
+opt-level = 2
+lto = true
+codegen-units = 1

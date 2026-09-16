@@ -1,0 +1,83 @@
+name: Android Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Install Android SDK and NDK
+        uses: android-actions/setup-android@v3
+        with:
+          android-sdk-version: '34'
+          ndk-version: '26.2.11394342'
+          cmake-version: '3.10.2'
+      
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --sdk_root=${ANDROID_SDK_ROOT} --licenses || true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Add Android targets to Rust
+        run: |
+          rustup target add aarch64-linux-android
+          rustup target add armv7-linux-androideabi
+          rustup target add i686-linux-android
+          rustup target add x86_64-linux-android
+
+      - name: Build phonopaper-rs for Android
+        run: |
+          cd phonopaper-rs
+          cargo build --release --target aarch64-linux-android
+          cargo build --release --target armv7-linux-androideabi
+          cargo build --release --target i686-linux-android
+          cargo build --release --target x86_64-linux-android
+
+      - name: Build phonopaper-android library
+        run: |
+          cd phonopaper-android
+          cargo build --release --target aarch64-linux-android
+          cargo build --release --target armv7-linux-androideabi
+          cargo build --release --target i686-linux-android
+          cargo build --release --target x86_64-linux-android
+
+      - name: Copy native libraries to jniLibs
+        run: |
+          mkdir -p phonopaper-android/app/src/main/jniLibs/arm64-v8a
+          mkdir -p phonopaper-android/app/src/main/jniLibs/armeabi-v7a
+          mkdir -p phonopaper-android/app/src/main/jniLibs/x86
+          mkdir -p phonopaper-android/app/src/main/jniLibs/x86_64
+          
+          cp phonopaper-android/target/aarch64-linux-android/release/libphonopaper_android.so phonopaper-android/app/src/main/jniLibs/arm64-v8a/libphonopaper_android.so
+          cp phonopaper-android/target/armv7-linux-androideabi/release/libphonopaper_android.so phonopaper-android/app/src/main/jniLibs/armeabi-v7a/libphonopaper_android.so
+          cp phonopaper-android/target/i686-linux-android/release/libphonopaper_android.so phonopaper-android/app/src/main/jniLibs/x86/libphonopaper_android.so
+          cp phonopaper-android/target/x86_64-linux-android/release/libphonopaper_android.so phonopaper-android/app/src/main/jniLibs/x86_64/libphonopaper_android.so
+
+      - name: Build Android app with Gradle
+        run: |
+          cd phonopaper-android
+          ./gradlew assembleRelease
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: phonopaper-android-apk
+          path: phonopaper-android/app/build/outputs/apk/release/app-release.apk
+          retention-days: 90
