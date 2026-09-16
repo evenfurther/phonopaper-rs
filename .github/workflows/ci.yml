@@ -94,11 +94,18 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
-      - name: Build Android release APK
+      - name: Build Android APKs
         working-directory: android-app
-        run: ./gradlew assembleRelease --stacktrace
+        run: ./gradlew assembleDebug assembleRelease --stacktrace
 
-      - name: Upload Android APK artifact
+      - name: Upload installable Android APK artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: phonopaper-android-installable-apk
+          path: android-app/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+
+      - name: Upload unsigned Android release APK artifact
         uses: actions/upload-artifact@v7
         with:
           name: phonopaper-android-release-apk
