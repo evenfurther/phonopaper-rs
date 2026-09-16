@@ -76,12 +76,13 @@ tasks.register('buildRustRelease', Exec) {
     }
 }
 
-tasks.named('preDebugBuild') {
-    dependsOn tasks.named('buildRustDebug')
-}
-
-tasks.named('preReleaseBuild') {
-    dependsOn tasks.named('buildRustRelease')
+tasks.configureEach {
+    if (name == 'preDebugBuild') {
+        dependsOn tasks.named('buildRustDebug')
+    }
+    if (name == 'preReleaseBuild') {
+        dependsOn tasks.named('buildRustRelease')
+    }
 }
 
 dependencies {
