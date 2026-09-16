@@ -1,7 +1,5 @@
-plugins {
-    id 'com.android.application'
-    id 'org.jetbrains.kotlin.android'
-}
+apply plugin: 'com.android.application'
+apply plugin: 'org.jetbrains.kotlin.android'
 
 def jniLibsDir = file("$projectDir/src/main/jniLibs")
 def rustManifest = file("${rootDir}/../phonopaper-android/Cargo.toml")

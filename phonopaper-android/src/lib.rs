@@ -4,12 +4,15 @@
 //! Rust so the mobile application can share the same decoding logic as the
 //! workspace library.
 
-use std::{panic::{AssertUnwindSafe, catch_unwind}, ptr};
+use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
+    ptr,
+};
 
 use image::DynamicImage;
 use jni::{
     JNIEnv,
-    objects::{JByteArray, JClass, JShortArray},
+    objects::{JByteArray, JClass},
     sys::jshortArray,
 };
 use phonopaper_rs::{
@@ -56,29 +59,27 @@ pub fn decode_image_to_pcm(image_bytes: &[u8]) -> Result<Vec<i16>, String> {
 }
 
 /// JNI entry point used by the Android application to decode an image into PCM.
+#[must_use]
 #[unsafe(export_name = "Java_com_evenfurther_phonopaper_PhonopaperNative_decodeImageToPcm")]
 pub extern "system" fn java_decode_image_to_pcm(
     mut env: JNIEnv,
     _class: JClass,
     image_bytes: JByteArray,
 ) -> jshortArray {
-    with_runtime_exception(&mut env, |env| decode_image_to_pcm_array(env, image_bytes))
-        .map_or(ptr::null_mut(), JShortArray::into_raw)
-}
-
-fn with_runtime_exception<T>(
-    env: &mut JNIEnv,
-    f: impl FnOnce(&mut JNIEnv) -> Result<T, String>,
-) -> Option<T> {
-    match catch_unwind(AssertUnwindSafe(|| f(env))) {
-        Ok(Ok(value)) => Some(value),
+    match catch_unwind(AssertUnwindSafe(|| {
+        decode_image_to_pcm_array(&mut env, image_bytes)
+    })) {
+        Ok(Ok(array)) => array,
         Ok(Err(message)) => {
             let _ = env.throw_new("java/lang/RuntimeException", message);
-            None
+            ptr::null_mut()
         }
         Err(_) => {
-            let _ = env.throw_new("java/lang/RuntimeException", "Rust panic while decoding image.");
-            None
+            let _ = env.throw_new(
+                "java/lang/RuntimeException",
+                "Rust panic while decoding image.",
+            );
+            ptr::null_mut()
         }
     }
 }
@@ -86,20 +87,24 @@ fn with_runtime_exception<T>(
 fn decode_image_to_pcm_array(
     env: &mut JNIEnv,
     image_bytes: JByteArray,
-) -> Result<JShortArray<'static>, String> {
+) -> Result<jshortArray, String> {
     let bytes = env
         .convert_byte_array(image_bytes)
         .map_err(|err| err.to_string())?;
     let pcm = decode_image_to_pcm(&bytes)?;
-    let len = i32::try_from(pcm.len()).map_err(|_| "Decoded audio is too large for JNI.".to_string())?;
+    let len =
+        i32::try_from(pcm.len()).map_err(|_| "Decoded audio is too large for JNI.".to_string())?;
     let output = env.new_short_array(len).map_err(|err| err.to_string())?;
     env.set_short_array_region(&output, 0, &pcm)
         .map_err(|err| err.to_string())?;
 
-    Ok(output)
+    Ok(output.into_raw())
 }
 
-fn interpolate_bounds(image: &DynamicImage, sample_columns: u32) -> Result<Vec<(f32, f32)>, String> {
+fn interpolate_bounds(
+    image: &DynamicImage,
+    sample_columns: u32,
+) -> Result<Vec<(f32, f32)>, String> {
     use image::GenericImageView as _;
 
     let (width, _) = image.dimensions();
@@ -205,7 +210,8 @@ fn float_to_pcm16(sample: f32) -> i16 {
         clippy::cast_possible_truncation,
         reason = "rounded sample is clamped to the 16-bit PCM output range"
     )]
-    (sample.clamp(-1.0, 1.0) * 32_767.5).round() as i16
+    let pcm = (sample.clamp(-1.0, 1.0) * 32_767.5).round() as i16;
+    pcm
 }
 
 #[cfg(test)]
