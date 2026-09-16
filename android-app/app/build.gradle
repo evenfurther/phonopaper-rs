@@ -63,6 +63,8 @@ tasks.register('buildRustDebug', Exec) {
     dependsOn tasks.named('cleanRustJniLibs')
     workingDir rootDir.parentFile
     commandLine rustCommand(false)
+    environment 'CARGO_BUILD_RUSTFLAGS', ''
+    environment 'RUSTFLAGS', ''
     doFirst {
         jniLibsDir.mkdirs()
     }
@@ -72,6 +74,8 @@ tasks.register('buildRustRelease', Exec) {
     dependsOn tasks.named('cleanRustJniLibs')
     workingDir rootDir.parentFile
     commandLine rustCommand(true)
+    environment 'CARGO_BUILD_RUSTFLAGS', ''
+    environment 'RUSTFLAGS', ''
     doFirst {
         jniLibsDir.mkdirs()
     }
