@@ -208,15 +208,16 @@ Current app flow:
 - decode it in Rust with the robust per-column marker interpolation path
 - play the synthesized mono PCM audio with `AudioTrack`
 
-Build a release APK locally with:
+Build an installable APK locally with:
 
 ```bash
 cd android-app
-./gradlew assembleRelease
+./gradlew assembleDebug
 ```
 
-The CI workflow also builds this APK and uploads
-`app/build/outputs/apk/release/app-release-unsigned.apk` as an artifact.
+The CI workflow builds both debug and release APKs, uploads the installable debug
+artifact at `app/build/outputs/apk/debug/app-debug.apk`, and also publishes the
+unsigned release artifact at `app/build/outputs/apk/release/app-release-unsigned.apk`.
 
 ## Library usage
 
@@ -351,6 +352,14 @@ When you touch the Android integration, also build the APK:
 ```bash
 cd android-app
 ./gradlew assembleRelease
+```
+
+If you need an installable local APK for device testing, build the signed debug
+variant instead:
+
+```bash
+cd android-app
+./gradlew assembleDebug
 ```
 
 Coverage (informational, not a hard gate):
