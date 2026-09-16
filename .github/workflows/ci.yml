@@ -60,6 +60,45 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+  android-apk:
+    name: Android APK
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Android Rust targets
+        run: rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build Android release APK
+        working-directory: android-app
+        run: ./gradlew assembleRelease --stacktrace
+
+      - name: Upload Android APK artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: phonopaper-android-release-apk
+          path: android-app/app/build/outputs/apk/release/app-release-unsigned.apk
+          retention-days: 30
+
   bench-iai:
     name: IAI-Callgrind benchmarks
     runs-on: ubuntu-latest

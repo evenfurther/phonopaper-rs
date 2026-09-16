@@ -5,7 +5,7 @@ to this repository.
 
 ## Repository layout
 
-This repository is a Cargo **workspace** with two member crates:
+This repository is a Cargo **workspace** plus an Android application:
 
 ```
 phonopaper-rs/           ← repo root (workspace)
@@ -13,7 +13,7 @@ phonopaper-rs/           ← repo root (workspace)
 ├── .cargo/config.toml   ← target-cpu=native
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml       ← fmt, clippy, test, IAI benchmarks
+│       ├── ci.yml       ← fmt, clippy, test, Android APK, IAI benchmarks
 │       └── coverage.yml ← cargo-llvm-cov, posts diff comment on PRs
 ├── phonopaper-rs/       ← library crate (published to crates.io)
 │   ├── Cargo.toml
@@ -21,16 +21,29 @@ phonopaper-rs/           ← repo root (workspace)
 │   ├── tests/           ← integration tests + fixtures
 │   ├── benches/         ← Criterion and IAI-Callgrind benchmarks
 │   └── examples/        ← developer / research examples
-└── phonopaper-cli/      ← binary crate (cargo install phonopaper-cli)
-    ├── Cargo.toml
-    └── src/
-        ├── main.rs      ← Cli struct, shared helpers, entry point
-        └── cmd/         ← one module per subcommand
-            ├── mod.rs
-            ├── decode.rs
-            ├── encode.rs
-            ├── robust_decode.rs
-            └── blank.rs
+├── phonopaper-cli/      ← binary crate (cargo install phonopaper-cli)
+│   ├── Cargo.toml
+│   └── src/
+│       ├── main.rs      ← Cli struct, shared helpers, entry point
+│       └── cmd/         ← one module per subcommand
+│           ├── mod.rs
+│           ├── decode.rs
+│           ├── encode.rs
+│           ├── robust_decode.rs
+│           └── blank.rs
+├── phonopaper-android/  ← Rust `cdylib` JNI bridge for Android
+│   ├── Cargo.toml
+│   └── src/lib.rs
+└── android-app/         ← Kotlin Android app that calls the Rust bridge
+    ├── build.gradle
+    ├── settings.gradle
+    ├── gradlew
+    └── app/
+        ├── build.gradle
+        └── src/main/
+            ├── AndroidManifest.xml
+            ├── java/com/evenfurther/phonopaper/
+            └── res/
 ```
 
 Workspace-level lints (`[workspace.lints.clippy] pedantic = "warn"`) are
@@ -86,6 +99,15 @@ cargo llvm-cov -p phonopaper-rs --tests --ignore-filename-regex='(benches|exampl
 ```
 
 Run them in this order. Fix any issues before considering the task done.
+
+When a task changes `phonopaper-android/` or `android-app/`, also run:
+
+```bash
+cd android-app
+./gradlew assembleRelease
+```
+
+This verifies the Android Gradle project, JNI bridge, and APK packaging path used by CI.
 
 > **Performance gate:** after running `cargo bench`, compare the results against
 > the baseline below.  A change is acceptable if every benchmark stays within
