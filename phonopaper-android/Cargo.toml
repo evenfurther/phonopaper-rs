@@ -12,7 +12,7 @@ phonopaper-rs = { path = "../phonopaper-rs" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = "0.4"
-android-logger = "0.3"
+android_logger = "0.3"
 jni = "0.21"
 
 [profile.release]
