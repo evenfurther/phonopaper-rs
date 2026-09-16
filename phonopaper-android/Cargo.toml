@@ -9,6 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 phonopaper-rs = { path = "../phonopaper-rs" }
+image = "0.24"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.4", features = ["native-activity"] }
