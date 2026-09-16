@@ -21,12 +21,14 @@ played back by sweeping a phone camera across it.
 
 ## Repository layout
 
-This is a Cargo workspace with two crates:
+This repository contains a Cargo workspace plus an Android app:
 
-| Crate | Path | Description |
+| Component | Path | Description |
 |---|---|---|
 | `phonopaper-rs` | `phonopaper-rs/` | Core library — encode, decode, render, vector output |
 | `phonopaper-cli` | `phonopaper-cli/` | `phonopaper` binary — four subcommands |
+| `phonopaper-android` | `phonopaper-android/` | JNI bridge crate that exposes Rust decoding to Android |
+| Android app | `android-app/` | Thin Kotlin UI that picks an image, calls Rust, and plays the decoded PCM |
 
 ---
 
@@ -194,6 +196,28 @@ phonopaper blank --paper letter --portrait
 
 ---
 
+### Android application (experimental)
+
+The repository also includes an experimental Android application in `android-app/`.
+It keeps the UI in Kotlin but performs the `PhonoPaper` decoding pipeline in the
+`phonopaper-android` Rust `cdylib`, which reuses `phonopaper-rs` directly.
+
+Current app flow:
+
+- pick a `PhonoPaper` image from Android's document picker
+- decode it in Rust with the robust per-column marker interpolation path
+- play the synthesized mono PCM audio with `AudioTrack`
+
+Build a release APK locally with:
+
+```bash
+cd android-app
+./gradlew assembleRelease
+```
+
+The CI workflow also builds this APK and uploads
+`app/build/outputs/apk/release/app-release-unsigned.apk` as an artifact.
+
 ## Library usage
 
 Add to your `Cargo.toml`:
@@ -313,13 +337,20 @@ std::fs::write("code.pdf", spectrogram_to_pdf(&spec, &render, PdfPageLayout::Fit
 
 ## Development
 
-All four commands must pass with zero warnings and zero errors:
+The Rust workspace checks remain:
 
 ```bash
 cargo fmt --check --all
 cargo clippy --workspace --all-targets
 cargo test --workspace
 cargo bench -p phonopaper-rs
+```
+
+When you touch the Android integration, also build the APK:
+
+```bash
+cd android-app
+./gradlew assembleRelease
 ```
 
 Coverage (informational, not a hard gate):
