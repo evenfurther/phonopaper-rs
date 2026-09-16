@@ -4,16 +4,19 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.os.Bundle
+import android.util.Log
 import android.widget.Button
 import android.widget.ImageView
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicInteger
 
 class MainActivity : AppCompatActivity() {
     private var decodedPcm: ShortArray? = null
     private var audioTrack: AudioTrack? = null
+    private val decodeGeneration = AtomicInteger(0)
 
     private lateinit var previewImage: ImageView
     private lateinit var pickImageButton: Button
@@ -26,6 +29,7 @@ class MainActivity : AppCompatActivity() {
             return@registerForActivityResult
         }
 
+        val generation = decodeGeneration.incrementAndGet()
         previewImage.setImageURI(uri)
         stopPlayback()
         pickImageButton.isEnabled = false
@@ -40,6 +44,9 @@ class MainActivity : AppCompatActivity() {
                 } ?: throw IOException("Could not open the selected image.")
                 val pcm = PhonopaperNative.decodeImageToPcm(bytes)
                 runOnUiThread {
+                    if (generation != decodeGeneration.get()) {
+                        return@runOnUiThread
+                    }
                     decodedPcm = pcm
                     pickImageButton.isEnabled = true
                     playButton.isEnabled = pcm.isNotEmpty()
@@ -47,12 +54,16 @@ class MainActivity : AppCompatActivity() {
                     statusText.text = "Decoded ${pcm.size} mono PCM samples at 44.1 kHz."
                 }
             } catch (error: Exception) {
+                Log.e(TAG, "Decoding failed", error)
                 runOnUiThread {
+                    if (generation != decodeGeneration.get()) {
+                        return@runOnUiThread
+                    }
                     decodedPcm = null
                     pickImageButton.isEnabled = true
                     playButton.isEnabled = false
                     stopButton.isEnabled = false
-                    statusText.text = error.message ?: "Decoding failed."
+                    statusText.text = userVisibleDecodeError(error)
                 }
             }
         }.start()
@@ -104,8 +115,8 @@ class MainActivity : AppCompatActivity() {
             .setTransferMode(AudioTrack.MODE_STATIC)
             .build()
 
-        track.write(pcm, 0, pcm.size)
-        track.notificationMarkerPosition = pcm.size
+        val writtenSamples = writeAll(track, pcm)
+        track.notificationMarkerPosition = writtenSamples
         track.setPlaybackPositionUpdateListener(
             object : AudioTrack.OnPlaybackPositionUpdateListener {
                 override fun onMarkerReached(track: AudioTrack) {
@@ -134,5 +145,31 @@ class MainActivity : AppCompatActivity() {
         audioTrack = null
         stopButton.isEnabled = false
         playButton.isEnabled = decodedPcm != null
+    }
+
+    private fun userVisibleDecodeError(error: Exception): String {
+        val details = error.message.orEmpty()
+        return when {
+            error is IOException -> "Could not read the selected image."
+            "marker pattern" in details -> "Could not find a valid PhonoPaper marker pattern in the selected image."
+            "image" in details.lowercase() -> "The selected file is not a supported image."
+            else -> "Decoding failed. Try a clearer image with visible markers."
+        }
+    }
+
+    private fun writeAll(track: AudioTrack, pcm: ShortArray): Int {
+        var totalWritten = 0
+        while (totalWritten < pcm.size) {
+            val written = track.write(pcm, totalWritten, pcm.size - totalWritten)
+            if (written <= 0) {
+                throw IOException("Audio playback could not be started.")
+            }
+            totalWritten += written
+        }
+        return totalWritten
+    }
+
+    companion object {
+        private const val TAG = "MainActivity"
     }
 }

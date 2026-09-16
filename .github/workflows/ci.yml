@@ -11,6 +11,9 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+permissions:
+  contents: read
+
 jobs:
   fmt:
     name: Formatting
@@ -103,6 +106,7 @@ jobs:
     name: IAI-Callgrind benchmarks
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pull-requests: write
       actions: read
     env:
