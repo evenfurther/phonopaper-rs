@@ -108,6 +108,9 @@ fn interpolate_bounds(
     use image::GenericImageView as _;
 
     let (width, _) = image.dimensions();
+    if width == 0 {
+        return Err("The image has zero width and cannot be decoded.".to_string());
+    }
     let n_samples = sample_columns.min(width).max(2);
 
     let mut sample_xs: Vec<u32> = (0..n_samples)
@@ -212,41 +215,4 @@ fn float_to_pcm16(sample: f32) -> i16 {
     )]
     let pcm = (sample.clamp(-1.0, 1.0) * 32_767.5).round() as i16;
     pcm
-}
-
-#[cfg(test)]
-mod tests {
-    use phonopaper_rs::{
-        SpectrogramVec,
-        render::{RenderOptions, spectrogram_to_image},
-    };
-
-    use super::decode_image_to_pcm;
-
-    #[test]
-    fn decode_generated_phonopaper_image() {
-        let mut spectrogram = SpectrogramVec::new(24);
-        for col in 0..spectrogram.num_columns() {
-            spectrogram.set(col, 120, 1.0);
-            if col % 3 == 0 {
-                spectrogram.set(col, 144, 0.5);
-            }
-        }
-
-        let image = spectrogram_to_image(&spectrogram, &RenderOptions::default());
-        let mut png = Vec::new();
-        image
-            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-            .expect("write PNG test fixture");
-
-        let pcm = decode_image_to_pcm(&png).expect("decode generated image");
-        assert!(!pcm.is_empty());
-        assert!(pcm.iter().any(|&sample| sample != 0));
-    }
-
-    #[test]
-    fn reject_invalid_image_bytes() {
-        let err = decode_image_to_pcm(b"not an image").expect_err("invalid input should fail");
-        assert!(!err.is_empty());
-    }
 }
