@@ -321,5 +321,6 @@ fn float_to_pcm16(sample: f32) -> i16 {
         clippy::cast_possible_truncation,
         reason = "rounded sample is clamped to the 16-bit PCM output range"
     )]
-    (sample.clamp(-1.0, 1.0) * 32_767.5).round() as i16
+    let pcm = (sample.clamp(-1.0, 1.0) * 32_767.5).round() as i16;
+    pcm
 }
