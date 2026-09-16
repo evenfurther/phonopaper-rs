@@ -79,6 +79,18 @@ jobs:
           cp target/i686-linux-android/release/libphonopaper_android.so phonopaper-android/app/src/main/jniLibs/x86/libphonopaper_android.so
           cp target/x86_64-linux-android/release/libphonopaper_android.so phonopaper-android/app/src/main/jniLibs/x86_64/libphonopaper_android.so
 
+      - name: Install Gradle
+        run: |
+          wget https://services.gradle.org/distributions/gradle-8.3-bin.zip -P /tmp
+          unzip -q /tmp/gradle-8.3-bin.zip -d /tmp
+          echo "GRADLE_HOME=/tmp/gradle-8.3" >> $GITHUB_ENV
+          echo "PATH=/tmp/gradle-8.3/bin:$PATH" >> $GITHUB_ENV
+
+      - name: Generate Gradle wrapper
+        run: |
+          cd phonopaper-android
+          gradle wrapper --gradle-version 8.3
+
       - name: Build Android app with Gradle
         run: |
           cd phonopaper-android
