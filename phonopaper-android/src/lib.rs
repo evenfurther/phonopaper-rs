@@ -1,8 +1,8 @@
 //! Phonopaper Android library - Rust JNI bindings for camera-based decoding
 
 use jni::objects::{JClass, JObject, JString, JValue};
-use jni::sys::{jbyteArray, jfloatArray, jint, jobject};
-use jni::{JNIEnv, JNIEnvExt};
+use jni::sys::{jfloatArray, jint, jobject};
+use jni::JNIEnv;
 use phonopaper_rs::decode::{column_amplitudes_from_image_into, detect_markers_at_column, spectrogram_to_audio, SynthesisOptions};
 use phonopaper_rs::format::TOTAL_BINS;
 use phonopaper_rs::spectrogram::SpectrogramVec;
@@ -36,7 +36,7 @@ pub extern "system" fn Java_com_example_phonopaper_PhonopaperDecoder_init(
                     let width = rgb.width() as usize;
                     let height = rgb.height() as usize;
                     
-                    let mut spectrogram = SpectrogramVec::new(width, TOTAL_BINS);
+                    let mut spectrogram = SpectrogramVec::new(width);
                     
                     // Detect markers and extract data bounds
                     let data_top = 0;
@@ -98,7 +98,7 @@ pub extern "system" fn Java_com_example_phonopaper_PhonopaperDecoder_decodeRange
             }
             
             // Extract the column range from spectrogram
-            let mut partial_spectrogram = SpectrogramVec::new(cols, TOTAL_BINS);
+            let mut partial_spectrogram = SpectrogramVec::new(cols);
             for (dst_col, src_col) in (0..cols).zip(start..end) {
                 if src_col < state.spectrogram.num_columns() {
                     for bin in 0..TOTAL_BINS {
@@ -107,9 +107,10 @@ pub extern "system" fn Java_com_example_phonopaper_PhonopaperDecoder_decodeRange
                 }
             }
             
-            // Synthesize audio
+            // Synthesize audio - use the const generic version
             let options = SynthesisOptions::default();
-            let audio = spectrogram_to_audio(&partial_spectrogram, state.sample_rate, state.samples_per_column, options);
+            let mut audio = vec![0.0f32; cols * state.samples_per_column];
+            spectrogram_to_audio::<{ 353 }>(&partial_spectrogram, &options, &mut audio);
             
             // Convert to Java float array
             let result = env.new_float_array(audio.len() as i32).unwrap();
