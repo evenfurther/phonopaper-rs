@@ -13,7 +13,7 @@ use image::DynamicImage;
 use jni::{
     JNIEnv,
     objects::{JByteArray, JClass},
-    sys::jshortArray,
+    sys::{jintArray, jshortArray},
 };
 use phonopaper_rs::{
     SpectrogramVec,
@@ -29,6 +29,7 @@ const SAMPLES_PER_COLUMN: usize = 353;
 const SAMPLE_RATE: u32 = 44_100;
 const GAIN: f32 = 0.15;
 const THRESHOLD: f32 = 0.85;
+const NO_MARKER_MESSAGE: &str = "No `PhonoPaper` marker pattern found in the supplied image.";
 
 /// Decode a `PhonoPaper` image byte buffer into mono 16-bit PCM audio.
 ///
@@ -58,6 +59,50 @@ pub fn decode_image_to_pcm(image_bytes: &[u8]) -> Result<Vec<i16>, String> {
     Ok(samples.into_iter().map(float_to_pcm16).collect())
 }
 
+/// Detect the approximate vertical `PhonoPaper` data area in an image.
+///
+/// This is used by the Android preview overlay to highlight the region that
+/// currently contains decodable paper data.
+///
+/// # Errors
+///
+/// Returns an error when the image bytes are invalid or the image geometry is
+/// unusable. Returns `Ok(None)` when the image is valid but no markers were
+/// detected.
+pub fn detect_preview_bounds(image_bytes: &[u8]) -> Result<Option<(u32, u32)>, String> {
+    use image::GenericImageView as _;
+
+    let image = image::load_from_memory(image_bytes).map_err(|err| err.to_string())?;
+    let (width, _) = image.dimensions();
+    let detected = sample_detected_bounds(&image, SAMPLE_COLUMNS)?;
+    if detected.is_empty() {
+        return Ok(None);
+    }
+
+    let interpolated = interpolate_bounds_from_detected(width, &detected);
+    let (top, bottom) = interpolated.into_iter().fold(
+        (f32::INFINITY, f32::NEG_INFINITY),
+        |(top, bottom), (candidate_top, candidate_bottom)| {
+            (top.min(candidate_top), bottom.max(candidate_bottom))
+        },
+    );
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "interpolated values are clamped to image coordinates before conversion"
+    )]
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "interpolated values are clamped to non-negative coordinates"
+    )]
+    let top = top.max(0.0).round() as u32;
+    #[expect(clippy::cast_possible_truncation, reason = "same as `top`")]
+    #[expect(clippy::cast_sign_loss, reason = "same as `top`")]
+    let bottom = bottom.max(0.0).round() as u32;
+
+    Ok(Some((top, bottom)))
+}
+
 /// JNI entry point used by the Android application to decode an image into PCM.
 #[must_use]
 #[unsafe(export_name = "Java_com_evenfurther_phonopaper_PhonopaperNative_decodeImageToPcm")]
@@ -84,6 +129,32 @@ pub extern "system" fn java_decode_image_to_pcm(
     }
 }
 
+/// JNI entry point used by the Android application to detect preview bounds.
+#[must_use]
+#[unsafe(export_name = "Java_com_evenfurther_phonopaper_PhonopaperNative_detectPreviewBounds")]
+pub extern "system" fn java_detect_preview_bounds(
+    mut env: JNIEnv,
+    _class: JClass,
+    image_bytes: JByteArray,
+) -> jintArray {
+    match catch_unwind(AssertUnwindSafe(|| {
+        detect_preview_bounds_array(&mut env, image_bytes)
+    })) {
+        Ok(Ok(array)) => array,
+        Ok(Err(message)) => {
+            let _ = env.throw_new("java/lang/RuntimeException", message);
+            ptr::null_mut()
+        }
+        Err(_) => {
+            let _ = env.throw_new(
+                "java/lang/RuntimeException",
+                "Rust panic while detecting preview bounds.",
+            );
+            ptr::null_mut()
+        }
+    }
+}
+
 fn decode_image_to_pcm_array(
     env: &mut JNIEnv,
     image_bytes: JByteArray,
@@ -101,10 +172,46 @@ fn decode_image_to_pcm_array(
     Ok(output.into_raw())
 }
 
+fn detect_preview_bounds_array(
+    env: &mut JNIEnv,
+    image_bytes: JByteArray,
+) -> Result<jintArray, String> {
+    let bytes = env
+        .convert_byte_array(image_bytes)
+        .map_err(|err| err.to_string())?;
+    let Some((top, bottom)) = detect_preview_bounds(&bytes)? else {
+        return Ok(ptr::null_mut());
+    };
+
+    let top = i32::try_from(top).map_err(|_| "Detected top bound does not fit in JNI.".to_string())?;
+    let bottom =
+        i32::try_from(bottom).map_err(|_| "Detected bottom bound does not fit in JNI.".to_string())?;
+    let output = env.new_int_array(2).map_err(|err| err.to_string())?;
+    env.set_int_array_region(&output, 0, &[top, bottom])
+        .map_err(|err| err.to_string())?;
+
+    Ok(output.into_raw())
+}
+
 fn interpolate_bounds(
     image: &DynamicImage,
     sample_columns: u32,
 ) -> Result<Vec<(f32, f32)>, String> {
+    use image::GenericImageView as _;
+
+    let (width, _) = image.dimensions();
+    let detected = sample_detected_bounds(image, sample_columns)?;
+    if detected.is_empty() {
+        return Err(NO_MARKER_MESSAGE.to_string());
+    }
+
+    Ok(interpolate_bounds_from_detected(width, &detected))
+}
+
+fn sample_detected_bounds(
+    image: &DynamicImage,
+    sample_columns: u32,
+) -> Result<Vec<(u32, f32, f32)>, String> {
     use image::GenericImageView as _;
 
     let (width, _) = image.dimensions();
@@ -140,15 +247,15 @@ fn interpolate_bounds(
         }
     }
 
-    if detected.is_empty() {
-        return Err("No `PhonoPaper` marker pattern found in the supplied image.".to_string());
-    }
+    Ok(detected)
+}
 
+fn interpolate_bounds_from_detected(width: u32, detected: &[(u32, f32, f32)]) -> Vec<(f32, f32)> {
     #[expect(
         clippy::cast_precision_loss,
         reason = "column indices are converted to f32 for interpolation arithmetic"
     )]
-    Ok((0..width)
+    (0..width)
         .map(|x| {
             let xf = x as f32;
             let pos = detected.partition_point(|&(ax, _, _)| ax <= x);
@@ -170,7 +277,7 @@ fn interpolate_bounds(
                 }
             }
         })
-        .collect())
+        .collect()
 }
 
 fn build_spectrogram(
@@ -213,6 +320,5 @@ fn float_to_pcm16(sample: f32) -> i16 {
         clippy::cast_possible_truncation,
         reason = "rounded sample is clamped to the 16-bit PCM output range"
     )]
-    let pcm = (sample.clamp(-1.0, 1.0) * 32_767.5).round() as i16;
-    pcm
+    (sample.clamp(-1.0, 1.0) * 32_767.5).round() as i16
 }

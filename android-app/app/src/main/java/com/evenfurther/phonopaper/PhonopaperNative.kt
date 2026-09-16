@@ -7,4 +7,7 @@ object PhonopaperNative {
 
     @JvmStatic
     external fun decodeImageToPcm(imageBytes: ByteArray): ShortArray
+
+    @JvmStatic
+    external fun detectPreviewBounds(imageBytes: ByteArray): IntArray?
 }
