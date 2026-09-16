@@ -74,10 +74,10 @@ jobs:
           mkdir -p phonopaper-android/app/src/main/jniLibs/x86
           mkdir -p phonopaper-android/app/src/main/jniLibs/x86_64
           
-          cp phonopaper-android/target/aarch64-linux-android/release/libphonopaper_android.so phonopaper-android/app/src/main/jniLibs/arm64-v8a/libphonopaper_android.so
-          cp phonopaper-android/target/armv7-linux-androideabi/release/libphonopaper_android.so phonopaper-android/app/src/main/jniLibs/armeabi-v7a/libphonopaper_android.so
-          cp phonopaper-android/target/i686-linux-android/release/libphonopaper_android.so phonopaper-android/app/src/main/jniLibs/x86/libphonopaper_android.so
-          cp phonopaper-android/target/x86_64-linux-android/release/libphonopaper_android.so phonopaper-android/app/src/main/jniLibs/x86_64/libphonopaper_android.so
+          cp target/aarch64-linux-android/release/libphonopaper_android.so phonopaper-android/app/src/main/jniLibs/arm64-v8a/libphonopaper_android.so
+          cp target/armv7-linux-androideabi/release/libphonopaper_android.so phonopaper-android/app/src/main/jniLibs/armeabi-v7a/libphonopaper_android.so
+          cp target/i686-linux-android/release/libphonopaper_android.so phonopaper-android/app/src/main/jniLibs/x86/libphonopaper_android.so
+          cp target/x86_64-linux-android/release/libphonopaper_android.so phonopaper-android/app/src/main/jniLibs/x86_64/libphonopaper_android.so
 
       - name: Build Android app with Gradle
         run: |
