@@ -4,13 +4,10 @@
 //! Rust so the mobile application can share the same decoding logic as the
 //! workspace library.
 
-use std::{
-    panic::{AssertUnwindSafe, catch_unwind},
-    ptr,
-};
-
 use image::DynamicImage;
 use jni::{
+    Env, EnvUnowned,
+    errors::ThrowRuntimeExAndDefault,
     JNIEnv,
     objects::{JByteArray, JClass},
     sys::{jintArray, jshortArray},
@@ -110,56 +107,28 @@ pub fn detect_preview_bounds(image_bytes: &[u8]) -> Result<Option<(u32, u32)>, S
 #[must_use]
 #[unsafe(export_name = "Java_com_evenfurther_phonopaper_PhonopaperNative_decodeImageToPcm")]
 pub extern "system" fn java_decode_image_to_pcm(
-    mut env: JNIEnv,
+    mut env: EnvUnowned,
     _class: JClass,
     image_bytes: JByteArray,
 ) -> jshortArray {
-    match catch_unwind(AssertUnwindSafe(|| {
-        decode_image_to_pcm_array(&mut env, image_bytes)
-    })) {
-        Ok(Ok(array)) => array,
-        Ok(Err(message)) => {
-            let _ = env.throw_new("java/lang/RuntimeException", message);
-            ptr::null_mut()
-        }
-        Err(_) => {
-            let _ = env.throw_new(
-                "java/lang/RuntimeException",
-                "Rust panic while decoding image.",
-            );
-            ptr::null_mut()
-        }
-    }
+    env.with_env(|env| decode_image_to_pcm_array(env, image_bytes))
+        .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 /// JNI entry point used by the Android application to detect preview bounds.
 #[must_use]
 #[unsafe(export_name = "Java_com_evenfurther_phonopaper_PhonopaperNative_detectPreviewBounds")]
 pub extern "system" fn java_detect_preview_bounds(
-    mut env: JNIEnv,
+    mut env: EnvUnowned,
     _class: JClass,
     image_bytes: JByteArray,
 ) -> jintArray {
-    match catch_unwind(AssertUnwindSafe(|| {
-        detect_preview_bounds_array(&mut env, image_bytes)
-    })) {
-        Ok(Ok(array)) => array,
-        Ok(Err(message)) => {
-            let _ = env.throw_new("java/lang/RuntimeException", message);
-            ptr::null_mut()
-        }
-        Err(_) => {
-            let _ = env.throw_new(
-                "java/lang/RuntimeException",
-                "Rust panic while detecting preview bounds.",
-            );
-            ptr::null_mut()
-        }
-    }
+    env.with_env(|env| detect_preview_bounds_array(env, image_bytes))
+        .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 fn decode_image_to_pcm_array(
-    env: &mut JNIEnv,
+    env: &mut Env<'_>,
     image_bytes: JByteArray,
 ) -> Result<jshortArray, String> {
     let bytes = env
@@ -176,7 +145,7 @@ fn decode_image_to_pcm_array(
 }
 
 fn detect_preview_bounds_array(
-    env: &mut JNIEnv,
+    env: &mut Env<'_>,
     image_bytes: JByteArray,
 ) -> Result<jintArray, String> {
     let bytes = env
