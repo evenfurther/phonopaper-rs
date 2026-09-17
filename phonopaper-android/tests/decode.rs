@@ -4,6 +4,30 @@ use phonopaper_rs::{
     render::{RenderOptions, spectrogram_to_image},
 };
 
+fn encode_png(image: &image::DynamicImage) -> Vec<u8> {
+    let mut png = Vec::new();
+    image
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .expect("write PNG test fixture");
+    png
+}
+
+fn deterministic_noise(width: u32, height: u32, seed: u64) -> image::DynamicImage {
+    let mut state = seed;
+    let img = image::GrayImage::from_fn(width, height, |_x, _y| {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the top byte of the PRNG state always fits in u8"
+        )]
+        let value = (state >> 56) as u8;
+        image::Luma([value])
+    });
+    image::DynamicImage::ImageLuma8(img)
+}
+
 #[test]
 fn decode_generated_phonopaper_image() {
     let mut spectrogram = SpectrogramVec::new(24);
@@ -15,11 +39,7 @@ fn decode_generated_phonopaper_image() {
     }
 
     let image = spectrogram_to_image(&spectrogram, &RenderOptions::default());
-    let mut png = Vec::new();
-    image
-        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-        .expect("write PNG test fixture");
-
+    let png = encode_png(&image::DynamicImage::ImageRgb8(image));
     let pcm = decode_image_to_pcm(&png).expect("decode generated image");
     assert!(!pcm.is_empty());
     assert!(pcm.iter().any(|&sample| sample != 0));
@@ -29,4 +49,41 @@ fn decode_generated_phonopaper_image() {
 fn reject_invalid_image_bytes() {
     let err = decode_image_to_pcm(b"not an image").expect_err("invalid input should fail");
     assert!(!err.is_empty());
+}
+
+#[test]
+fn reject_noise_image() {
+    let png = encode_png(&deterministic_noise(80, 484, 17));
+    let err = decode_image_to_pcm(&png).expect_err("noise image should not decode as PhonoPaper");
+    assert!(err.contains("marker"), "unexpected error: {err}");
+}
+
+#[test]
+fn decode_only_embedded_pattern_columns() {
+    let pattern_width = 16usize;
+    let left_padding = 12u32;
+    let right_padding = 12u32;
+    let total_width = left_padding + pattern_width as u32 + right_padding;
+
+    let mut spectrogram = SpectrogramVec::new(pattern_width);
+    for col in 0..pattern_width {
+        spectrogram.set(col, 120, 1.0);
+        if col % 4 == 0 {
+            spectrogram.set(col, 156, 0.75);
+        }
+    }
+
+    let pattern = spectrogram_to_image(&spectrogram, &RenderOptions::default());
+    let mut composite =
+        image::RgbImage::from_pixel(total_width, pattern.height(), image::Rgb([255u8, 255, 255]));
+    for x in 0..pattern.width() {
+        for y in 0..pattern.height() {
+            composite.put_pixel(left_padding + x, y, *pattern.get_pixel(x, y));
+        }
+    }
+
+    let png = encode_png(&image::DynamicImage::ImageRgb8(composite));
+    let pcm = decode_image_to_pcm(&png).expect("embedded pattern should decode");
+    assert_eq!(pcm.len(), pattern_width * 353);
+    assert!(pcm.iter().any(|&sample| sample != 0));
 }

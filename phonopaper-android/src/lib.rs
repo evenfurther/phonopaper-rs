@@ -41,8 +41,9 @@ const THRESHOLD: f32 = 0.85;
 /// be recovered, or the spectrogram cannot be synthesized.
 pub fn decode_image_to_pcm(image_bytes: &[u8]) -> Result<Vec<i16>, String> {
     let image = image::load_from_memory(image_bytes).map_err(|err| err.to_string())?;
-    let col_bounds = interpolate_bounds(&image, SAMPLE_COLUMNS)?;
-    let spectrogram = build_spectrogram(&image, &col_bounds).map_err(|err| err.to_string())?;
+    let (x_start, col_bounds) = interpolate_bounds(&image, SAMPLE_COLUMNS)?;
+    let spectrogram =
+        build_spectrogram(&image, x_start, &col_bounds).map_err(|err| err.to_string())?;
     let options = SynthesisOptions {
         sample_rate: SAMPLE_RATE,
         gain: GAIN,
@@ -104,7 +105,7 @@ fn decode_image_to_pcm_array(
 fn interpolate_bounds(
     image: &DynamicImage,
     sample_columns: u32,
-) -> Result<Vec<(f32, f32)>, String> {
+) -> Result<(u32, Vec<(f32, f32)>), String> {
     use image::GenericImageView as _;
 
     let (width, _) = image.dimensions();
@@ -129,16 +130,25 @@ fn interpolate_bounds(
         .collect();
     sample_xs.dedup();
 
-    let mut detected = Vec::with_capacity(sample_xs.len());
+    let mut sample_results = Vec::with_capacity(sample_xs.len());
     for &col_x in &sample_xs {
-        if let Ok(bounds) = detect_markers_at_column(image, col_x) {
+        sample_results.push((col_x, detect_markers_at_column(image, col_x).ok()));
+    }
+
+    let cluster = select_consistent_cluster(&sample_results)?;
+    let left = cluster.first().map(|(x, _)| *x).unwrap_or(0);
+    let right = cluster.last().map(|(x, _)| *x).unwrap_or(left);
+
+    let detected: Vec<(u32, f32, f32)> = cluster
+        .iter()
+        .map(|&(col_x, bounds)| {
             #[expect(
                 clippy::cast_precision_loss,
                 reason = "pixel coordinates are converted to f32 for interpolation"
             )]
-            detected.push((col_x, bounds.data_top as f32, bounds.data_bottom as f32));
-        }
-    }
+            (col_x, bounds.data_top as f32, bounds.data_bottom as f32)
+        })
+        .collect();
 
     if detected.is_empty() {
         return Err("No `PhonoPaper` marker pattern found in the supplied image.".to_string());
@@ -148,7 +158,7 @@ fn interpolate_bounds(
         clippy::cast_precision_loss,
         reason = "column indices are converted to f32 for interpolation arithmetic"
     )]
-    Ok((0..width)
+    let bounds = (left..=right)
         .map(|x| {
             let xf = x as f32;
             let pos = detected.partition_point(|&(ax, _, _)| ax <= x);
@@ -170,11 +180,65 @@ fn interpolate_bounds(
                 }
             }
         })
-        .collect())
+        .collect();
+
+    Ok((left, bounds))
+}
+
+fn select_consistent_cluster(
+    sample_results: &[(u32, Option<DataBounds>)],
+) -> Result<Vec<(u32, DataBounds)>, String> {
+    let min_cluster_len = sample_results.len().min(3);
+    let mut best_cluster: Vec<(u32, DataBounds)> = Vec::new();
+    let mut current_cluster: Vec<(u32, DataBounds)> = Vec::new();
+
+    for &(col_x, bounds) in sample_results {
+        match bounds {
+            Some(bounds) => {
+                let continues_cluster =
+                    current_cluster
+                        .last()
+                        .is_some_and(|&(prev_x, prev_bounds)| {
+                            bounds_are_consistent(prev_x, prev_bounds, col_x, bounds)
+                        });
+
+                if !continues_cluster {
+                    if current_cluster.len() > best_cluster.len() {
+                        best_cluster = std::mem::take(&mut current_cluster);
+                    } else {
+                        current_cluster.clear();
+                    }
+                }
+
+                current_cluster.push((col_x, bounds));
+            }
+            None => {
+                if current_cluster.len() > best_cluster.len() {
+                    best_cluster = std::mem::take(&mut current_cluster);
+                } else {
+                    current_cluster.clear();
+                }
+            }
+        }
+    }
+
+    if current_cluster.len() > best_cluster.len() {
+        best_cluster = current_cluster;
+    }
+
+    if best_cluster.len() < min_cluster_len {
+        return Err(
+            "No sufficiently wide `PhonoPaper` marker cluster found in the supplied image."
+                .to_string(),
+        );
+    }
+
+    Ok(best_cluster)
 }
 
 fn build_spectrogram(
     image: &DynamicImage,
+    x_start: u32,
     col_bounds: &[(f32, f32)],
 ) -> phonopaper_rs::Result<SpectrogramVec> {
     let mut spectrogram = SpectrogramVec::new(col_bounds.len());
@@ -199,13 +263,27 @@ fn build_spectrogram(
         };
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "image columns are indexed by u32 and the width comes from the image"
+            reason = "spectrogram columns are offset from x_start and stay within image width"
         )]
-        column_amplitudes_from_image_into(image, Some(bounds), col_x as u32, &mut amplitudes)?;
+        let image_col = x_start + col_x as u32;
+        column_amplitudes_from_image_into(image, Some(bounds), image_col, &mut amplitudes)?;
         spectrogram.column_mut(col_x).copy_from_slice(&amplitudes);
     }
 
     Ok(spectrogram)
+}
+
+fn bounds_are_consistent(prev_x: u32, prev: DataBounds, next_x: u32, next: DataBounds) -> bool {
+    let dx = next_x.abs_diff(prev_x);
+    let max_boundary_step = dx / 4 + 4;
+    let prev_height = prev.height();
+    let next_height = next.height();
+    let min_height = prev_height.min(next_height);
+    let max_height_delta = min_height / 10 + 6;
+
+    prev.data_top.abs_diff(next.data_top) <= max_boundary_step
+        && prev.data_bottom.abs_diff(next.data_bottom) <= max_boundary_step
+        && prev_height.abs_diff(next_height) <= max_height_delta
 }
 
 fn float_to_pcm16(sample: f32) -> i16 {
