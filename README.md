@@ -28,7 +28,7 @@ This repository contains a Cargo workspace plus an Android app:
 | `phonopaper-rs` | `phonopaper-rs/` | Core library — encode, decode, render, vector output |
 | `phonopaper-cli` | `phonopaper-cli/` | `phonopaper` binary — four subcommands |
 | `phonopaper-android` | `phonopaper-android/` | JNI bridge crate that exposes Rust decoding to Android |
-| Android app | `android-app/` | Thin Kotlin UI that picks an image, calls Rust, and plays the decoded PCM |
+| Android app | `android-app/` | Kotlin UI with live camera preview, capture/manual scrubbing controls, and a Rust-backed decoder |
 
 ---
 
@@ -204,9 +204,13 @@ It keeps the UI in Kotlin but performs the `PhonoPaper` decoding pipeline in the
 
 Current app flow:
 
-- pick a `PhonoPaper` image from Android's document picker
+- open the live camera preview and highlight the detected `PhonoPaper` data band in real time
+- automatically decode and play the current camera frame when live auto-play is enabled
+- capture the current camera frame or pick a `PhonoPaper` image from Android's document picker
 - decode it in Rust with the robust per-column marker interpolation path
-- play the synthesized mono PCM audio with `AudioTrack`
+- play the synthesized mono PCM audio with `AudioTrack`, either from the current seek position or by scrubbing directly on the image preview
+
+The Android resources also include a dedicated adaptive launcher icon so installed builds appear with a branded app icon in the launcher.
 
 Build an installable release APK locally with:
 

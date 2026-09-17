@@ -1,4 +1,5 @@
-use phonopaper_android::decode_image_to_pcm;
+use image::{GrayImage, Luma};
+use phonopaper_android::{decode_image_to_pcm, detect_preview_bounds};
 use phonopaper_rs::{
     SpectrogramVec,
     render::{RenderOptions, spectrogram_to_image},
@@ -83,4 +84,32 @@ fn decode_only_embedded_pattern_columns() {
     let pcm = decode_image_to_pcm(&png).expect("embedded pattern should decode");
     assert_eq!(pcm.len(), pattern_width * 353);
     assert!(pcm.iter().any(|&sample| sample != 0));
+}
+
+#[test]
+fn detect_preview_bounds_generated_phonopaper_image() {
+    let mut spectrogram = SpectrogramVec::new(24);
+    for col in 0..spectrogram.num_columns() {
+        spectrogram.set(col, 120, 1.0);
+        if col % 2 == 0 {
+            spectrogram.set(col, 144, 0.5);
+        }
+    }
+
+    let image = spectrogram_to_image(&spectrogram, &RenderOptions::default());
+    let png = encode_png(&image::DynamicImage::ImageRgb8(image));
+
+    let bounds = detect_preview_bounds(&png)
+        .expect("generated image should be analyzable")
+        .expect("generated image should contain preview bounds");
+    assert!(bounds.0 < bounds.1);
+}
+
+#[test]
+fn detect_preview_bounds_blank_image_returns_none() {
+    let blank = GrayImage::from_pixel(32, 32, Luma([255]));
+    let png = encode_png(&image::DynamicImage::ImageLuma8(blank));
+
+    let bounds = detect_preview_bounds(&png).expect("blank PNG is still a valid image");
+    assert_eq!(bounds, None);
 }

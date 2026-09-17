@@ -13,7 +13,7 @@ use image::DynamicImage;
 use jni::{
     JNIEnv,
     objects::{JByteArray, JClass},
-    sys::jshortArray,
+    sys::{jintArray, jshortArray},
 };
 use phonopaper_rs::{
     SpectrogramVec,
@@ -29,6 +29,9 @@ const SAMPLES_PER_COLUMN: usize = 353;
 const SAMPLE_RATE: u32 = 44_100;
 const GAIN: f32 = 0.15;
 const THRESHOLD: f32 = 0.85;
+const NO_MARKER_MESSAGE: &str = "No `PhonoPaper` marker pattern found in the supplied image.";
+const NO_CLUSTER_MESSAGE: &str =
+    "No sufficiently wide `PhonoPaper` marker cluster found in the supplied image.";
 
 /// Decode a `PhonoPaper` image byte buffer into mono 16-bit PCM audio.
 ///
@@ -59,6 +62,50 @@ pub fn decode_image_to_pcm(image_bytes: &[u8]) -> Result<Vec<i16>, String> {
     Ok(samples.into_iter().map(float_to_pcm16).collect())
 }
 
+/// Detect the approximate vertical `PhonoPaper` data area in an image.
+///
+/// This is used by the Android preview overlay to highlight the region that
+/// currently contains decodable paper data.
+///
+/// # Errors
+///
+/// Returns an error when the image bytes are invalid or the image geometry is
+/// unusable. Returns `Ok(None)` when the image is valid but no markers were
+/// detected.
+pub fn detect_preview_bounds(image_bytes: &[u8]) -> Result<Option<(u32, u32)>, String> {
+    let image = image::load_from_memory(image_bytes).map_err(|err| err.to_string())?;
+    let detected = match sample_detected_bounds(&image, SAMPLE_COLUMNS) {
+        Ok(detected) => detected,
+        Err(message) if message == NO_CLUSTER_MESSAGE || message == NO_MARKER_MESSAGE => {
+            return Ok(None);
+        }
+        Err(message) => return Err(message),
+    };
+    let (left, right) = detected_span(&detected).ok_or_else(|| NO_MARKER_MESSAGE.to_string())?;
+    let interpolated = interpolate_bounds_from_detected(left, right, &detected);
+    let (top, bottom) = interpolated.into_iter().fold(
+        (f32::INFINITY, f32::NEG_INFINITY),
+        |(top, bottom), (candidate_top, candidate_bottom)| {
+            (top.min(candidate_top), bottom.max(candidate_bottom))
+        },
+    );
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "interpolated values are clamped to image coordinates before conversion"
+    )]
+    #[expect(
+        clippy::cast_sign_loss,
+        reason = "interpolated values are clamped to non-negative coordinates"
+    )]
+    let top = top.max(0.0).round() as u32;
+    #[expect(clippy::cast_possible_truncation, reason = "same as `top`")]
+    #[expect(clippy::cast_sign_loss, reason = "same as `top`")]
+    let bottom = bottom.max(0.0).round() as u32;
+
+    Ok(Some((top, bottom)))
+}
+
 /// JNI entry point used by the Android application to decode an image into PCM.
 #[must_use]
 #[unsafe(export_name = "Java_com_evenfurther_phonopaper_PhonopaperNative_decodeImageToPcm")]
@@ -85,6 +132,32 @@ pub extern "system" fn java_decode_image_to_pcm(
     }
 }
 
+/// JNI entry point used by the Android application to detect preview bounds.
+#[must_use]
+#[unsafe(export_name = "Java_com_evenfurther_phonopaper_PhonopaperNative_detectPreviewBounds")]
+pub extern "system" fn java_detect_preview_bounds(
+    mut env: JNIEnv,
+    _class: JClass,
+    image_bytes: JByteArray,
+) -> jintArray {
+    match catch_unwind(AssertUnwindSafe(|| {
+        detect_preview_bounds_array(&mut env, image_bytes)
+    })) {
+        Ok(Ok(array)) => array,
+        Ok(Err(message)) => {
+            let _ = env.throw_new("java/lang/RuntimeException", message);
+            ptr::null_mut()
+        }
+        Err(_) => {
+            let _ = env.throw_new(
+                "java/lang/RuntimeException",
+                "Rust panic while detecting preview bounds.",
+            );
+            ptr::null_mut()
+        }
+    }
+}
+
 fn decode_image_to_pcm_array(
     env: &mut JNIEnv,
     image_bytes: JByteArray,
@@ -102,10 +175,45 @@ fn decode_image_to_pcm_array(
     Ok(output.into_raw())
 }
 
+fn detect_preview_bounds_array(
+    env: &mut JNIEnv,
+    image_bytes: JByteArray,
+) -> Result<jintArray, String> {
+    let bytes = env
+        .convert_byte_array(image_bytes)
+        .map_err(|err| err.to_string())?;
+    let Some((top, bottom)) = detect_preview_bounds(&bytes)? else {
+        return Ok(ptr::null_mut());
+    };
+
+    let top =
+        i32::try_from(top).map_err(|_| "Detected top bound does not fit in JNI.".to_string())?;
+    let bottom = i32::try_from(bottom)
+        .map_err(|_| "Detected bottom bound does not fit in JNI.".to_string())?;
+    let output = env.new_int_array(2).map_err(|err| err.to_string())?;
+    env.set_int_array_region(&output, 0, &[top, bottom])
+        .map_err(|err| err.to_string())?;
+
+    Ok(output.into_raw())
+}
+
 fn interpolate_bounds(
     image: &DynamicImage,
     sample_columns: u32,
 ) -> Result<(u32, Vec<(f32, f32)>), String> {
+    let detected = sample_detected_bounds(image, sample_columns)?;
+    let (left, right) = detected_span(&detected).ok_or_else(|| NO_MARKER_MESSAGE.to_string())?;
+
+    Ok((
+        left,
+        interpolate_bounds_from_detected(left, right, &detected),
+    ))
+}
+
+fn sample_detected_bounds(
+    image: &DynamicImage,
+    sample_columns: u32,
+) -> Result<Vec<(u32, f32, f32)>, String> {
     use image::GenericImageView as _;
 
     let (width, _) = image.dimensions();
@@ -136,10 +244,7 @@ fn interpolate_bounds(
     }
 
     let cluster = select_consistent_cluster(&sample_results)?;
-    let left = cluster.first().map_or(0, |(x, _)| *x);
-    let right = cluster.last().map_or(left, |(x, _)| *x);
-
-    let detected: Vec<(u32, f32, f32)> = cluster
+    Ok(cluster
         .iter()
         .map(|&(col_x, bounds)| {
             #[expect(
@@ -148,17 +253,23 @@ fn interpolate_bounds(
             )]
             (col_x, bounds.data_top as f32, bounds.data_bottom as f32)
         })
-        .collect();
+        .collect())
+}
 
-    if detected.is_empty() {
-        return Err("No `PhonoPaper` marker pattern found in the supplied image.".to_string());
-    }
+fn detected_span(detected: &[(u32, f32, f32)]) -> Option<(u32, u32)> {
+    Some((detected.first()?.0, detected.last()?.0))
+}
 
+fn interpolate_bounds_from_detected(
+    left: u32,
+    right: u32,
+    detected: &[(u32, f32, f32)],
+) -> Vec<(f32, f32)> {
     #[expect(
         clippy::cast_precision_loss,
         reason = "column indices are converted to f32 for interpolation arithmetic"
     )]
-    let bounds = (left..=right)
+    (left..=right)
         .map(|x| {
             let xf = x as f32;
             let pos = detected.partition_point(|&(ax, _, _)| ax <= x);
@@ -180,9 +291,7 @@ fn interpolate_bounds(
                 }
             }
         })
-        .collect();
-
-    Ok((left, bounds))
+        .collect()
 }
 
 fn select_consistent_cluster(
@@ -227,10 +336,7 @@ fn select_consistent_cluster(
     }
 
     if best_cluster.len() < min_cluster_len {
-        return Err(
-            "No sufficiently wide `PhonoPaper` marker cluster found in the supplied image."
-                .to_string(),
-        );
+        return Err(NO_CLUSTER_MESSAGE.to_string());
     }
 
     Ok(best_cluster)
