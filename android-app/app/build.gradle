@@ -18,12 +18,12 @@ def rustCommand = { releaseBuild ->
 
 android {
     namespace 'com.evenfurther.phonopaper'
-    compileSdk 35
+    compileSdk 37
 
     defaultConfig {
         applicationId 'com.evenfurther.phonopaper'
         minSdk 26
-        targetSdk 35
+        targetSdk 37
         versionCode 1
         versionName '0.1.0'
     }
@@ -86,11 +86,11 @@ tasks.configureEach {
 }
 
 dependencies {
-    implementation 'androidx.activity:activity-ktx:1.9.2'
+    implementation 'androidx.activity:activity-ktx:1.13.0'
     implementation 'androidx.appcompat:appcompat:1.8.0'
-    implementation 'androidx.camera:camera-camera2:1.4.2'
-    implementation 'androidx.camera:camera-core:1.4.2'
-    implementation 'androidx.camera:camera-lifecycle:1.4.2'
-    implementation 'androidx.camera:camera-view:1.4.2'
-    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.camera:camera-camera2:1.6.2'
+    implementation 'androidx.camera:camera-core:1.6.2'
+    implementation 'androidx.camera:camera-lifecycle:1.6.2'
+    implementation 'androidx.camera:camera-view:1.6.2'
+    implementation 'androidx.core:core-ktx:1.19.0'
 }

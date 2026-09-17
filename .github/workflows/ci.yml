@@ -83,12 +83,12 @@ jobs:
         uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: '17.0.20+101'
+          java-version: '25.0.4+101.0.LTS'
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
-          packages: platform-tools
+          packages: platform-tools platforms;android-37 build-tools;37.0.0
           log-accepted-android-sdk-licenses: false
 
       - name: Install cargo-ndk
