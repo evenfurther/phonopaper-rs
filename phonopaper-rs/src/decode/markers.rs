@@ -82,10 +82,15 @@ fn min3(a: u32, b: u32, c: u32) -> u32 {
     a.min(b).min(c)
 }
 
-fn is_consistent_run_family(lengths: &[u32]) -> bool {
-    let (Some(&min_len), Some(&max_len)) = (lengths.iter().min(), lengths.iter().max()) else {
-        return false;
-    };
+fn is_consistent_pair(a: u32, b: u32) -> bool {
+    let min_len = a.min(b);
+    let max_len = a.max(b);
+    min_len > 0 && max_len <= min_len * 3
+}
+
+fn is_consistent_triplet(a: u32, b: u32, c: u32) -> bool {
+    let min_len = min3(a, b, c);
+    let max_len = max3(a, b, c);
     min_len > 0 && max_len <= min_len * 3
 }
 
@@ -107,17 +112,13 @@ fn matches_top_marker_pattern(runs: &[(bool, u32, u32)], idx: usize) -> Option<M
     let gap_3 = runs[idx + 1].2;
     let thick = runs[idx].2;
 
-    if !is_consistent_run_family(&[outer_thin_1, outer_thin_2])
-        || !is_consistent_run_family(&[gap_1, gap_2, gap_3])
+    if !is_consistent_pair(outer_thin_1, outer_thin_2)
+        || !is_consistent_triplet(gap_1, gap_2, gap_3)
     {
         return None;
     }
 
     let thin_ref = outer_thin_1.max(outer_thin_2);
-    if thin_ref == 0 || gap_1.min(gap_2).min(gap_3) == 0 {
-        return None;
-    }
-
     if thick.saturating_mul(2) < 3 * (outer_thin_1 + outer_thin_2) {
         return None;
     }
@@ -155,17 +156,13 @@ fn matches_bottom_marker_pattern(runs: &[(bool, u32, u32)], idx: usize) -> Optio
     let gap_3 = runs[idx + 3].2;
     let thick = runs[idx].2;
 
-    if !is_consistent_run_family(&[outer_thin_1, outer_thin_2])
-        || !is_consistent_run_family(&[gap_1, gap_2, gap_3])
+    if !is_consistent_pair(outer_thin_1, outer_thin_2)
+        || !is_consistent_triplet(gap_1, gap_2, gap_3)
     {
         return None;
     }
 
     let thin_ref = outer_thin_1.max(outer_thin_2);
-    if thin_ref == 0 || gap_1.min(gap_2).min(gap_3) == 0 {
-        return None;
-    }
-
     if thick.saturating_mul(2) < 3 * (outer_thin_1 + outer_thin_2) {
         return None;
     }
@@ -201,9 +198,7 @@ fn find_marker_candidate(
 }
 
 fn evenly_spaced_columns(width: u32, requested_samples: u32) -> Vec<u32> {
-    if width == 0 {
-        return Vec::new();
-    }
+    debug_assert!(width > 0, "width must be non-zero");
     let n_samples = requested_samples.min(width).max(1);
     let mut sample_xs: Vec<u32> = (0..n_samples)
         .map(|i| {

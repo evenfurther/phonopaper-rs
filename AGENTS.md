@@ -193,7 +193,7 @@ cargo llvm-cov -p phonopaper-rs --tests --ignore-filename-regex='(benches|exampl
 |---|---|---|---|
 | `audio.rs`           | 87.21 % |  69.23 % |  81.68 % |
 | `decode/image.rs`    | 98.39 % | 100.00 % | 100.00 % |
-| `decode/markers.rs`  | 97.27 % | 100.00 % |  96.08 % |
+| `decode/markers.rs`  | 98.87 % | 100.00 % |  96.33 % |
 | `decode/synth.rs`    | 96.17 % | 100.00 % |  94.74 % |
 | `decode/wav.rs`      | 81.51 % |  75.00 % |  88.24 % |
 | `encode.rs`          | 97.48 % | 100.00 % |  99.00 % |
@@ -201,7 +201,7 @@ cargo llvm-cov -p phonopaper-rs --tests --ignore-filename-regex='(benches|exampl
 | `render.rs`          |100.00 % | 100.00 % | 100.00 % |
 | `spectrogram.rs`     | 96.08 % | 100.00 % |  97.44 % |
 | `vector.rs`          | 96.13 % |  87.10 % |  91.92 % |
-| **TOTAL**            | **94.84 %** | **90.82 %** | **93.71 %** |
+| **TOTAL**            | **95.49 %** | **91.89 %** | **93.90 %** |
 
 A change is acceptable if **every file stays at or above its baseline** for all
 three metrics (regions, functions, lines).  New public functions added without
@@ -219,9 +219,6 @@ accompanying tests will lower the numbers and must be caught before merging.
 | `decode/synth.rs:428-430` | Zero-phasor reset branch in `renormalize()`; unreachable because phasors are unit-complex numbers that can only drift to zero under extreme floating-point pathology, not in normal synthesis. |
 | `decode/synth.rs:609` | `synth.renormalize()` call inside `spectrogram_to_audio`; only triggered when `num_columns ≥ RENORM_INTERVAL` (128). No test synthesises that many columns; adding such a test would be expensive and the branch is covered by the direct `Synthesizer::renormalize` unit test. |
 | `encode.rs:190` | Zero-padding branch that is dead code under the current frame-counting formula. |
-| `decode/markers.rs:172` | Closing `)` of a multi-line `ok_or(...)` call; LLVM counts this as a separate region when `rustfmt` places it on its own line — the branch itself is tested. |
-| `decode/markers.rs:193,200` | Defensive fallbacks requiring a thick stripe with no adjacent thin stripe — impossible to construct with valid `PhonoPaper` marker geometry. |
-| `decode/markers.rs:204` | `data area has zero height` guard; unreachable when the defensive fallbacks above are also unreachable (the fallback values satisfy `data_bottom > data_top` by construction). |
 | `vector.rs:601-603,618-620,628-629` | Error-closure bodies inside `ok_or_else(|| …)` calls in `image_from_pdf`; the corresponding `image_from_pdf_error_*` tests do exercise these paths, but LLVM counts multi-line closure bodies as separate regions and marks them uncovered when `rustfmt` spreads them across lines. |
 | `vector.rs:632-638` | Size-mismatch error block in `image_from_pdf`; same LLVM multi-line closure artifact as above — the `image_from_pdf_error_size_mismatch` test exercises this path. |
 | `vector.rs:647-650` | `GrayImage::from_raw` returning `None` inside `image_from_pdf`; unreachable because the `pixels.len() != img_w * img_h` guard immediately above guarantees the dimensions are consistent. |

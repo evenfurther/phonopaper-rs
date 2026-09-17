@@ -136,8 +136,8 @@ fn interpolate_bounds(
     }
 
     let cluster = select_consistent_cluster(&sample_results)?;
-    let left = cluster.first().map(|(x, _)| *x).unwrap_or(0);
-    let right = cluster.last().map(|(x, _)| *x).unwrap_or(left);
+    let left = cluster.first().map_or(0, |(x, _)| *x);
+    let right = cluster.last().map_or(left, |(x, _)| *x);
 
     let detected: Vec<(u32, f32, f32)> = cluster
         .iter()

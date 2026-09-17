@@ -18,10 +18,6 @@ fn deterministic_noise(width: u32, height: u32, seed: u64) -> image::DynamicImag
         state = state
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1);
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "the top byte of the PRNG state always fits in u8"
-        )]
         let value = (state >> 56) as u8;
         image::Luma([value])
     });
@@ -63,7 +59,8 @@ fn decode_only_embedded_pattern_columns() {
     let pattern_width = 16usize;
     let left_padding = 12u32;
     let right_padding = 12u32;
-    let total_width = left_padding + pattern_width as u32 + right_padding;
+    let pattern_width_u32 = u32::try_from(pattern_width).expect("pattern width fits in u32");
+    let total_width = left_padding + pattern_width_u32 + right_padding;
 
     let mut spectrogram = SpectrogramVec::new(pattern_width);
     for col in 0..pattern_width {
