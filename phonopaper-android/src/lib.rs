@@ -232,8 +232,7 @@ fn sample_detected_bounds(
                 clippy::cast_sign_loss,
                 reason = ".round() on a non-negative f64 product is always non-negative"
             )]
-            let x =
-                (f64::from(i) / f64::from(n_samples - 1) * f64::from(width - 1)).round() as u32;
+            let x = (f64::from(i) / f64::from(n_samples - 1) * f64::from(width - 1)).round() as u32;
             x.min(width - 1)
         })
         .collect();
@@ -306,9 +305,11 @@ fn select_consistent_cluster(
         match bounds {
             Some(bounds) => {
                 let continues_cluster =
-                    current_cluster.last().is_some_and(|&(prev_x, prev_bounds)| {
-                        bounds_are_consistent(prev_x, prev_bounds, col_x, bounds)
-                    });
+                    current_cluster
+                        .last()
+                        .is_some_and(|&(prev_x, prev_bounds)| {
+                            bounds_are_consistent(prev_x, prev_bounds, col_x, bounds)
+                        });
 
                 if !continues_cluster {
                     if current_cluster.len() > best_cluster.len() {
