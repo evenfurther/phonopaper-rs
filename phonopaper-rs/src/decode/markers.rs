@@ -52,29 +52,232 @@ impl DataBounds {
 // Threshold: a pixel is "dark" if its luminance is below this value.
 const DARK_THRESHOLD: u8 = 128;
 
-/// Find the index (within `dark_runs`) of the thick stripe in the slice
-/// `dark_runs[from..to]`.
-///
-/// The thick stripe is the dark run whose length is ≥ 3× the average of its
-/// immediate dark neighbours.  Falls back to the longest run if none qualifies.
-fn find_thick_stripe(dark_runs: &[(u32, u32)], from: usize, to: usize) -> Option<usize> {
-    let slice = &dark_runs[from..to];
-    if slice.len() < 3 {
+#[derive(Debug, Clone, Copy)]
+enum MarkerSide {
+    Top,
+    Bottom,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MarkerCandidate {
+    data_edge: u32,
+    thick_len: u32,
+    thin_ref: u32,
+    gap_ref: u32,
+}
+
+fn all_light(runs: &[(bool, u32, u32)], indices: &[usize]) -> bool {
+    indices.iter().all(|&idx| !runs[idx].0)
+}
+
+fn all_dark(runs: &[(bool, u32, u32)], indices: &[usize]) -> bool {
+    indices.iter().all(|&idx| runs[idx].0)
+}
+
+fn max3(a: u32, b: u32, c: u32) -> u32 {
+    a.max(b).max(c)
+}
+
+fn min3(a: u32, b: u32, c: u32) -> u32 {
+    a.min(b).min(c)
+}
+
+fn is_consistent_pair(a: u32, b: u32) -> bool {
+    let min_len = a.min(b);
+    let max_len = a.max(b);
+    min_len > 0 && max_len <= min_len * 3
+}
+
+fn is_consistent_triplet(a: u32, b: u32, c: u32) -> bool {
+    let min_len = min3(a, b, c);
+    let max_len = max3(a, b, c);
+    min_len > 0 && max_len <= min_len * 3
+}
+
+fn matches_top_marker_pattern(runs: &[(bool, u32, u32)], idx: usize) -> Option<MarkerCandidate> {
+    if idx < 5 || idx + 2 >= runs.len() {
         return None;
     }
-    // Find the run that is ≥ 3× all its neighbours.
-    for i in 1..slice.len().saturating_sub(1) {
-        let cur_len = slice[i].1;
-        let prev_len = slice[i - 1].1;
-        let next_len = slice[i + 1].1;
-        let avg_neighbours = f64::from(prev_len + next_len) / 2.0;
-        if f64::from(cur_len) >= 3.0 * avg_neighbours && avg_neighbours > 0.0 {
-            return Some(from + i);
+
+    let light_runs = [idx - 5, idx - 3, idx - 1, idx + 1];
+    let dark_runs = [idx - 4, idx - 2, idx, idx + 2];
+    if !all_light(runs, &light_runs) || !all_dark(runs, &dark_runs) {
+        return None;
+    }
+
+    let outer_thin_1 = runs[idx - 4].2;
+    let outer_thin_2 = runs[idx - 2].2;
+    let gap_1 = runs[idx - 3].2;
+    let gap_2 = runs[idx - 1].2;
+    let gap_3 = runs[idx + 1].2;
+    let thick = runs[idx].2;
+
+    if !is_consistent_pair(outer_thin_1, outer_thin_2)
+        || !is_consistent_triplet(gap_1, gap_2, gap_3)
+    {
+        return None;
+    }
+
+    let thin_ref = outer_thin_1.max(outer_thin_2);
+    if thick.saturating_mul(2) < 3 * (outer_thin_1 + outer_thin_2) {
+        return None;
+    }
+
+    let max_gap = max3(gap_1, gap_2, gap_3);
+    let min_gap = min3(gap_1, gap_2, gap_3);
+    if max_gap > thin_ref * 4 || min_gap * 2 < thin_ref {
+        return None;
+    }
+
+    let inner_dark = runs[idx + 2];
+    Some(MarkerCandidate {
+        data_edge: inner_dark.1 + inner_dark.2,
+        thick_len: thick,
+        thin_ref,
+        gap_ref: max_gap,
+    })
+}
+
+fn matches_bottom_marker_pattern(runs: &[(bool, u32, u32)], idx: usize) -> Option<MarkerCandidate> {
+    if idx < 2 || idx + 5 >= runs.len() {
+        return None;
+    }
+
+    let light_runs = [idx - 1, idx + 1, idx + 3, idx + 5];
+    let dark_runs = [idx - 2, idx, idx + 2, idx + 4];
+    if !all_light(runs, &light_runs) || !all_dark(runs, &dark_runs) {
+        return None;
+    }
+
+    let outer_thin_1 = runs[idx + 2].2;
+    let outer_thin_2 = runs[idx + 4].2;
+    let gap_1 = runs[idx - 1].2;
+    let gap_2 = runs[idx + 1].2;
+    let gap_3 = runs[idx + 3].2;
+    let thick = runs[idx].2;
+
+    if !is_consistent_pair(outer_thin_1, outer_thin_2)
+        || !is_consistent_triplet(gap_1, gap_2, gap_3)
+    {
+        return None;
+    }
+
+    let thin_ref = outer_thin_1.max(outer_thin_2);
+    if thick.saturating_mul(2) < 3 * (outer_thin_1 + outer_thin_2) {
+        return None;
+    }
+
+    let max_gap = max3(gap_1, gap_2, gap_3);
+    let min_gap = min3(gap_1, gap_2, gap_3);
+    if max_gap > thin_ref * 4 || min_gap * 2 < thin_ref {
+        return None;
+    }
+
+    Some(MarkerCandidate {
+        data_edge: runs[idx - 2].1,
+        thick_len: thick,
+        thin_ref,
+        gap_ref: max_gap,
+    })
+}
+
+fn find_marker_candidate(
+    runs: &[(bool, u32, u32)],
+    side: MarkerSide,
+    zone_start: u32,
+    zone_end: u32,
+) -> Option<MarkerCandidate> {
+    runs.iter()
+        .enumerate()
+        .filter(|(_, (is_dark, start, _))| *is_dark && *start >= zone_start && *start < zone_end)
+        .filter_map(|(idx, _)| match side {
+            MarkerSide::Top => matches_top_marker_pattern(runs, idx),
+            MarkerSide::Bottom => matches_bottom_marker_pattern(runs, idx),
+        })
+        .max_by_key(|candidate| candidate.thick_len)
+}
+
+fn evenly_spaced_columns(width: u32, requested_samples: u32) -> Vec<u32> {
+    debug_assert!(width > 0, "width must be non-zero");
+    let n_samples = requested_samples.min(width).max(1);
+    let mut sample_xs: Vec<u32> = (0..n_samples)
+        .map(|i| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "value is rounded and clamped to [0, width-1]; fits in u32"
+            )]
+            #[expect(
+                clippy::cast_sign_loss,
+                reason = ".round() on a non-negative f64 product is always non-negative"
+            )]
+            let x = (f64::from(i) / f64::from(n_samples - 1).max(1.0) * f64::from(width - 1))
+                .round() as u32;
+            x.min(width - 1)
+        })
+        .collect();
+    sample_xs.dedup();
+    sample_xs
+}
+
+fn bounds_are_consistent(prev_x: u32, prev: DataBounds, next_x: u32, next: DataBounds) -> bool {
+    let dx = next_x.abs_diff(prev_x);
+    let max_boundary_step = dx / 4 + 4;
+    let prev_height = prev.height();
+    let next_height = next.height();
+    let min_height = prev_height.min(next_height);
+    let max_height_delta = min_height / 10 + 6;
+
+    prev.data_top.abs_diff(next.data_top) <= max_boundary_step
+        && prev.data_bottom.abs_diff(next.data_bottom) <= max_boundary_step
+        && prev_height.abs_diff(next_height) <= max_height_delta
+}
+
+fn detect_markers_in_column_cluster(image: &DynamicImage, sample_xs: &[u32]) -> Result<DataBounds> {
+    let min_cluster_len = sample_xs.len().min(3);
+    let mut best_cluster: Vec<(u32, DataBounds)> = Vec::new();
+    let mut current_cluster: Vec<(u32, DataBounds)> = Vec::new();
+
+    for &col_x in sample_xs {
+        match detect_markers_at_column(image, col_x) {
+            Ok(bounds) => {
+                let continues_cluster =
+                    current_cluster
+                        .last()
+                        .is_some_and(|&(prev_x, prev_bounds)| {
+                            bounds_are_consistent(prev_x, prev_bounds, col_x, bounds)
+                        });
+
+                if !continues_cluster {
+                    if current_cluster.len() > best_cluster.len() {
+                        best_cluster = std::mem::take(&mut current_cluster);
+                    } else {
+                        current_cluster.clear();
+                    }
+                }
+
+                current_cluster.push((col_x, bounds));
+            }
+            Err(_) => {
+                if current_cluster.len() > best_cluster.len() {
+                    best_cluster = std::mem::take(&mut current_cluster);
+                } else {
+                    current_cluster.clear();
+                }
+            }
         }
     }
-    // Fallback: pick the longest run in the slice.
-    let max_idx = slice.iter().enumerate().max_by_key(|(_, (_, len))| *len)?.0;
-    Some(from + max_idx)
+
+    if current_cluster.len() > best_cluster.len() {
+        best_cluster = current_cluster;
+    }
+
+    if best_cluster.len() < min_cluster_len {
+        return Err(PhonoPaperError::MarkerNotFound(
+            "no sufficiently wide cluster of consistent marker detections found",
+        ));
+    }
+
+    Ok(best_cluster[best_cluster.len() / 2].1)
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -135,73 +338,41 @@ pub fn detect_markers_at_column(image: &DynamicImage, col_x: u32) -> Result<Data
         runs.push((dark, start, len));
     }
 
-    // Keep only dark runs; we need to find a thick one.
-    let dark_runs: Vec<(u32, u32)> = runs
-        .iter()
-        .filter(|(dark, _, _)| *dark)
-        .map(|(_, start, len)| (*start, *len))
-        .collect();
-
-    if dark_runs.len() < 3 {
-        return Err(PhonoPaperError::MarkerNotFound(
-            "fewer than 3 dark runs found",
-        ));
-    }
-
-    // Split the dark-run list by pixel row, not by list index.
-    //
-    // Splitting by index (n/2) breaks when the audio data area contains
-    // many dark pixels (e.g. a loud sine wave): those dark runs fill the
-    // middle of the list and push the real marker runs into the wrong half.
-    //
-    // Instead, search for the top marker only among runs that start in the
-    // top 30% of the image, and the bottom marker only among runs that start
-    // in the bottom 30%.  The marker bands occupy ≈ 184/1088 ≈ 17% of the
-    // image height at default settings, so 30% gives comfortable headroom.
+    // Search for a locally valid marker pattern in the top and bottom zones.
+    // Looking for the full light/dark stripe topology is much stricter than
+    // merely finding a long dark run, which avoids false positives on
+    // arbitrary photographs and random noise.
     let top_limit = height * 3 / 10;
     let bot_limit = height * 7 / 10;
 
-    let top_end = dark_runs.partition_point(|&(start, _)| start < top_limit);
-    let bot_start_idx = dark_runs.partition_point(|&(start, _)| start < bot_limit);
-
-    let top_idx = find_thick_stripe(&dark_runs, 0, top_end).ok_or(
-        PhonoPaperError::MarkerNotFound("no thick stripe in top 30% of image"),
+    let top_marker = find_marker_candidate(&runs, MarkerSide::Top, 0, top_limit).ok_or(
+        PhonoPaperError::MarkerNotFound("no valid top marker pattern found"),
     )?;
-    let bot_idx = find_thick_stripe(&dark_runs, bot_start_idx, dark_runs.len()).ok_or(
-        PhonoPaperError::MarkerNotFound("no thick stripe in bottom 30% of image"),
+    let bottom_marker = find_marker_candidate(&runs, MarkerSide::Bottom, bot_limit, height).ok_or(
+        PhonoPaperError::MarkerNotFound("no valid bottom marker pattern found"),
     )?;
 
-    let (top_start, top_len) = dark_runs[top_idx];
-    let (bot_start, _) = dark_runs[bot_idx];
-
-    // The marker band layout around the data area is:
-    //   top:    ... THICK_STRIPE → white gap → thin_stripe → [DATA]
-    //   bottom: [DATA] → thin_stripe → white gap → THICK_STRIPE ...
-    //
-    // So `top_thick_start + top_thick_len` lands in the white gap, not at the
-    // data area yet.  The next dark run after the thick stripe is the trailing
-    // thin stripe; the data area begins immediately after that thin stripe.
-    // Symmetrically, the dark run immediately before the bottom thick stripe is
-    // the leading thin stripe; the data area ends at the start of that run.
-    //
-    // If no such adjacent thin stripe exists (malformed image), fall back to
-    // the thick stripe edge itself.
-    let data_top = if top_idx + 1 < dark_runs.len() {
-        let (inner_start, inner_len) = dark_runs[top_idx + 1];
-        inner_start + inner_len
-    } else {
-        top_start + top_len
-    };
-
-    let data_bottom = if bot_idx > 0 {
-        let (inner_start, _) = dark_runs[bot_idx - 1];
-        inner_start
-    } else {
-        bot_start
-    };
+    let data_top = top_marker.data_edge;
+    let data_bottom = bottom_marker.data_edge;
 
     if data_bottom <= data_top {
         return Err(PhonoPaperError::MarkerNotFound("data area has zero height"));
+    }
+
+    let max_thin = top_marker.thin_ref.max(bottom_marker.thin_ref);
+    let min_thin = top_marker.thin_ref.min(bottom_marker.thin_ref);
+    if min_thin == 0 || max_thin > min_thin * 3 {
+        return Err(PhonoPaperError::MarkerNotFound(
+            "top and bottom marker stripe widths disagree too much",
+        ));
+    }
+
+    let max_gap = top_marker.gap_ref.max(bottom_marker.gap_ref);
+    let min_gap = top_marker.gap_ref.min(bottom_marker.gap_ref);
+    if min_gap == 0 || max_gap > min_gap * 3 {
+        return Err(PhonoPaperError::MarkerNotFound(
+            "top and bottom marker gap widths disagree too much",
+        ));
     }
 
     Ok(DataBounds {
@@ -214,16 +385,17 @@ pub fn detect_markers_at_column(image: &DynamicImage, col_x: u32) -> Result<Data
 /// marker bands.
 ///
 /// This is a more robust wrapper around [`detect_markers_at_column`] that
-/// samples up to three evenly-spaced columns (`width/4`, `width/2`,
-/// `3*width/4`) and returns the result from the first column that succeeds.
-/// If all three agree the result is unambiguous; if fewer than three succeed
-/// the earliest success is returned.
+/// samples up to nine evenly-spaced columns across the image, keeps only
+/// detections that form a horizontally consistent cluster, and returns the
+/// cluster's median bounds.  Isolated single-column hits are rejected so
+/// arbitrary photographs and noise do not decode as false `PhonoPaper`
+/// patterns.
 ///
-/// For clean, axis-aligned images all three columns produce identical
+/// For clean, axis-aligned images all sampled columns produce identical
 /// `DataBounds`.  For mildly distorted images (slight tilt or uneven
-/// illumination) at least one column typically succeeds where the centre
-/// column alone might fail.  For images with severe perspective distortion
-/// use [`detect_markers_at_column`] directly across many columns.
+/// illumination) the accepted cluster can drift smoothly across columns.  For
+/// images with severe perspective distortion use [`detect_markers_at_column`]
+/// directly across many columns.
 ///
 /// The `PhonoPaper` marker pattern consists of alternating black and white
 /// horizontal stripes.  The key identifying feature is a **thick black stripe**
@@ -233,18 +405,16 @@ pub fn detect_markers_at_column(image: &DynamicImage, col_x: u32) -> Result<Data
 ///
 /// # Algorithm
 ///
-/// 1. Collect a run-length-encoded sequence of dark/light runs along the
-///    sampled column.
-/// 2. Look for a run of dark pixels that is ≥ 3× the length of its immediate
-///    dark neighbours, searching only in the **top 30%** of the image for the
-///    top marker and the **bottom 30%** for the bottom marker.  This prevents
-///    dark pixels in the audio data area from being misidentified as marker
-///    stripes.
-/// 3. The data area starts immediately after the **thin stripe that follows**
-///    the top thick stripe (not at the thick stripe's inner edge), and ends
-///    immediately before the **thin stripe that precedes** the bottom thick
-///    stripe.  This correctly excludes the inner gap and thin stripe of each
-///    marker band from the decoded audio data.
+/// 1. For each sampled column, collect a run-length-encoded sequence of
+///    dark/light runs.
+/// 2. Search only in the **top 30%** and **bottom 30%** of the image, and
+///    require the full `PhonoPaper` light/dark stripe topology around each
+///    thick stripe candidate.
+/// 3. Compare the top and bottom marker proportions within the same column and
+///    reject columns whose stripe or gap widths disagree too much.
+/// 4. Keep only detections that remain horizontally consistent across adjacent
+///    sampled columns, then return the median bounds from the widest such
+///    cluster.
 ///
 /// # Errors
 ///
@@ -252,24 +422,9 @@ pub fn detect_markers_at_column(image: &DynamicImage, col_x: u32) -> Result<Data
 /// detected in any of the sampled columns.
 pub fn detect_markers(image: &DynamicImage) -> Result<DataBounds> {
     let (width, _) = image.dimensions();
-    // Try up to three evenly-spaced columns; return the first success.
-    // The candidates [width/4, width/2, 3*width/4] are computed by integer
-    // division and are already in non-decreasing order, so dedup() correctly
-    // removes consecutive duplicates (which can occur for very narrow images
-    // where width/4 == width/2 or width/2 == 3*width/4).
-    let candidates: Vec<u32> = {
-        let mut cs = vec![width / 4, width / 2, width * 3 / 4];
-        cs.dedup();
-        cs
-    };
-
-    let mut last_err =
-        PhonoPaperError::MarkerNotFound("no valid marker pattern in any sampled column");
-    for col in candidates {
-        match detect_markers_at_column(image, col) {
-            Ok(bounds) => return Ok(bounds),
-            Err(e) => last_err = e,
-        }
+    if width == 0 {
+        return Err(PhonoPaperError::MarkerNotFound("image has zero width"));
     }
-    Err(last_err)
+    let sample_xs = evenly_spaced_columns(width, 9);
+    detect_markers_in_column_cluster(image, &sample_xs)
 }

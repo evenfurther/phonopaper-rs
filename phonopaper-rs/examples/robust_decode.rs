@@ -128,7 +128,7 @@ struct Args {
 fn interpolate_bounds(
     image: &DynamicImage,
     sample_columns: u32,
-) -> Result<Vec<(f32, f32)>, String> {
+) -> Result<(u32, Vec<(f32, f32)>), String> {
     let (width, _) = image.dimensions();
 
     // Choose the actual number of sample columns, clamped to the image width.
@@ -157,37 +157,37 @@ fn interpolate_bounds(
     // Deduplicate (may happen for very narrow images).
     sample_xs.dedup();
 
-    // Run marker detection for each sample column; record successes.
-    let mut detected: Vec<(u32, f32, f32)> = Vec::with_capacity(sample_xs.len()); // (x, top, bottom)
-    let mut n_failed: usize = 0;
+    let sample_results: Vec<(u32, Option<DataBounds>)> = sample_xs
+        .iter()
+        .map(|&col_x| (col_x, detect_markers_at_column(image, col_x).ok()))
+        .collect();
+    let n_failed = sample_results
+        .iter()
+        .filter(|(_, bounds)| bounds.is_none())
+        .count();
+    let cluster = select_consistent_cluster(&sample_results)?;
+    let left = cluster.first().map_or(0, |(x, _)| *x);
+    let right = cluster.last().map_or(left, |(x, _)| *x);
 
-    for col_x in &sample_xs {
-        match detect_markers_at_column(image, *col_x) {
-            Ok(bounds) => {
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "pixel coordinates converted to f32 for interpolation; \
-                              loss is at most 1 ULP and has no perceptible audio effect"
-                )]
-                detected.push((*col_x, bounds.data_top as f32, bounds.data_bottom as f32));
-            }
-            Err(_) => {
-                n_failed += 1;
-            }
-        }
-    }
-
-    if detected.is_empty() {
-        return Err("No PhonoPaper marker pattern found in any sample column.".to_string());
-    }
+    let detected: Vec<(u32, f32, f32)> = cluster
+        .iter()
+        .map(|&(col_x, bounds)| {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "pixel coordinates converted to f32 for interpolation; \
+                          loss is at most 1 ULP and has no perceptible audio effect"
+            )]
+            (col_x, bounds.data_top as f32, bounds.data_bottom as f32)
+        })
+        .collect();
 
     // Warn if many columns failed (likely bad perspective or partial occlusion).
-    let fail_pct = n_failed * 100 / sample_xs.len();
+    let fail_pct = n_failed * 100 / sample_results.len();
     if fail_pct > 20 {
         eprintln!(
             "  Warning: marker detection failed in {n_failed}/{} sample columns ({fail_pct}%).  \
              Results may be inaccurate.",
-            sample_xs.len()
+            sample_results.len()
         );
     }
 
@@ -200,7 +200,7 @@ fn interpolate_bounds(
         clippy::cast_precision_loss,
         reason = "column index converted to f32 for interpolation arithmetic"
     )]
-    let result: Vec<(f32, f32)> = (0..width)
+    let result: Vec<(f32, f32)> = (left..=right)
         .map(|x| {
             let xf = x as f32;
             // Find the two anchors that bracket xf.
@@ -231,7 +231,7 @@ fn interpolate_bounds(
         })
         .collect();
 
-    Ok(result)
+    Ok((left, result))
 }
 
 // ─── Audio synthesis ─────────────────────────────────────────────────────────
@@ -243,6 +243,7 @@ fn interpolate_bounds(
 /// Returns an error if amplitude extraction fails for any column.
 fn build_spectrogram(
     image: &DynamicImage,
+    x_start: u32,
     col_bounds: &[(f32, f32)],
 ) -> Result<SpectrogramVec, phonopaper_rs::PhonoPaperError> {
     let width = col_bounds.len();
@@ -276,14 +277,77 @@ fn build_spectrogram(
 
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "col_x iterates over 0..width; width comes from col_bounds.len() which \
-                      was derived from image.width() (a u32), so col_x fits in u32"
+            reason = "spectrogram columns are offset from x_start and stay within image width"
         )]
-        column_amplitudes_from_image_into(image, Some(bounds), col_x as u32, &mut amp_buf)?;
+        let image_col = x_start + col_x as u32;
+        column_amplitudes_from_image_into(image, Some(bounds), image_col, &mut amp_buf)?;
         spec.column_mut(col_x).copy_from_slice(&amp_buf);
     }
 
     Ok(spec)
+}
+
+fn select_consistent_cluster(
+    sample_results: &[(u32, Option<DataBounds>)],
+) -> Result<Vec<(u32, DataBounds)>, String> {
+    let min_cluster_len = sample_results.len().min(3);
+    let mut best_cluster: Vec<(u32, DataBounds)> = Vec::new();
+    let mut current_cluster: Vec<(u32, DataBounds)> = Vec::new();
+
+    for &(col_x, bounds) in sample_results {
+        match bounds {
+            Some(bounds) => {
+                let continues_cluster =
+                    current_cluster
+                        .last()
+                        .is_some_and(|&(prev_x, prev_bounds)| {
+                            bounds_are_consistent(prev_x, prev_bounds, col_x, bounds)
+                        });
+
+                if !continues_cluster {
+                    if current_cluster.len() > best_cluster.len() {
+                        best_cluster = std::mem::take(&mut current_cluster);
+                    } else {
+                        current_cluster.clear();
+                    }
+                }
+
+                current_cluster.push((col_x, bounds));
+            }
+            None => {
+                if current_cluster.len() > best_cluster.len() {
+                    best_cluster = std::mem::take(&mut current_cluster);
+                } else {
+                    current_cluster.clear();
+                }
+            }
+        }
+    }
+
+    if current_cluster.len() > best_cluster.len() {
+        best_cluster = current_cluster;
+    }
+
+    if best_cluster.len() < min_cluster_len {
+        return Err(
+            "No sufficiently wide PhonoPaper marker cluster found in the image.".to_string(),
+        );
+    }
+
+    Ok(best_cluster)
+}
+
+fn bounds_are_consistent(prev_x: u32, prev: DataBounds, next_x: u32, next: DataBounds) -> bool {
+    let dx = next_x.abs_diff(prev_x);
+    let max_boundary_step = dx / 4 + 4;
+    let prev_height = prev.height();
+    let next_height = next.height();
+    let min_height = prev_height.min(next_height);
+    let max_height_delta = min_height / 10 + 6;
+
+    prev.data_top.abs_diff(next.data_top) <= max_boundary_step
+        && prev.data_bottom.abs_diff(next.data_bottom) <= max_boundary_step
+        && prev_height.abs_diff(next_height) <= max_height_delta
 }
 
 // ─── WAV writer ──────────────────────────────────────────────────────────────
@@ -345,6 +409,7 @@ fn write_wav(path: impl AsRef<Path>, samples: &[f32], sample_rate: u32) -> std::
 /// Returns an error if the image cannot be saved.
 fn save_debug_image(
     image: &DynamicImage,
+    x_start: u32,
     col_bounds: &[(f32, f32)],
     path: impl AsRef<Path>,
 ) -> image::ImageResult<()> {
@@ -353,9 +418,9 @@ fn save_debug_image(
     for (col_x, &(top_f, bottom_f)) in col_bounds.iter().enumerate() {
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "col_x ≤ image.width() which fits in u32"
+            reason = "spectrogram columns are offset from x_start and stay within image width"
         )]
-        let x = col_x as u32;
+        let x = x_start + col_x as u32;
         let (_, height) = image.dimensions();
 
         #[expect(
@@ -404,6 +469,7 @@ fn save_debug_image(
 /// or the image cannot be saved.
 fn save_rectified_image(
     image: &DynamicImage,
+    x_start: u32,
     col_bounds: &[(f32, f32)],
     path: impl AsRef<Path>,
 ) -> Result<(), String> {
@@ -411,7 +477,8 @@ fn save_rectified_image(
         return Err("Image too narrow to rectify.".to_string());
     }
 
-    let (width, _) = image.dimensions();
+    let width = u32::try_from(col_bounds.len())
+        .map_err(|_| "Detected data area is too wide to rectify.".to_string())?;
     #[expect(
         clippy::cast_precision_loss,
         reason = "width - 1 is a pixel coordinate; converted to f32 for imageproc projection \
@@ -487,7 +554,7 @@ fn save_rectified_image(
         "Could not compute perspective projection (degenerate geometry).".to_string()
     })?;
 
-    let rgb_input = image.to_rgb8();
+    let rgb_input = image.crop_imm(x_start, 0, width, image.height()).to_rgb8();
     let warped = warp(
         &rgb_input,
         projection,
@@ -511,7 +578,7 @@ fn run(args: &Args) -> Result<(), String> {
         "Detecting markers (sampling {} columns) …",
         args.sample_columns
     );
-    let col_bounds = interpolate_bounds(&image, args.sample_columns)?;
+    let (x_start, col_bounds) = interpolate_bounds(&image, args.sample_columns)?;
 
     // Print a summary of the detected bounds.
     let tops: Vec<f32> = col_bounds.iter().map(|&(t, _)| t).collect();
@@ -532,19 +599,19 @@ fn run(args: &Args) -> Result<(), String> {
     // 3. Optionally save the debug image.
     if let Some(ref debug_path) = args.debug_image {
         eprintln!("Saving debug image → {debug_path} …");
-        save_debug_image(&image, &col_bounds, debug_path)
+        save_debug_image(&image, x_start, &col_bounds, debug_path)
             .map_err(|e| format!("Cannot save debug image: {e}"))?;
     }
 
     // 4. Optionally save the rectified image.
     if let Some(ref rect_path) = args.rectified {
         eprintln!("Saving rectified image → {rect_path} …");
-        save_rectified_image(&image, &col_bounds, rect_path)?;
+        save_rectified_image(&image, x_start, &col_bounds, rect_path)?;
     }
 
     // 5. Build the spectrogram column by column.
     eprintln!("Building spectrogram ({} columns) …", col_bounds.len());
-    let spec = build_spectrogram(&image, &col_bounds)
+    let spec = build_spectrogram(&image, x_start, &col_bounds)
         .map_err(|e| format!("Spectrogram build failed: {e}"))?;
 
     // 6. Synthesise audio.

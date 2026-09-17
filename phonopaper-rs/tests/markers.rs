@@ -27,6 +27,47 @@ fn default_phonopaper_image() -> (DynamicImage, RenderOptions) {
     (DynamicImage::ImageRgb8(rgb), opts)
 }
 
+fn deterministic_noise_image(width: u32, height: u32, seed: u64) -> DynamicImage {
+    let mut state = seed;
+    let img = GrayImage::from_fn(width, height, |_x, _y| {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        let value = (state >> 56) as u8;
+        Luma([value])
+    });
+    DynamicImage::ImageLuma8(img)
+}
+
+fn image_with_embedded_pattern(
+    pattern_columns: usize,
+    outer_width: u32,
+    left_padding: u32,
+    right_padding: u32,
+) -> (DynamicImage, RenderOptions, std::ops::Range<u32>) {
+    let opts = RenderOptions {
+        draw_octave_lines: false,
+        ..RenderOptions::default()
+    };
+    let pattern = spectrogram_to_image(&SpectrogramVec::new(pattern_columns), &opts);
+    let pattern_width = pattern.width();
+    assert_eq!(outer_width, left_padding + pattern_width + right_padding);
+
+    let mut composite =
+        RgbImage::from_pixel(outer_width, pattern.height(), image::Rgb([255u8, 255, 255]));
+    for x in 0..pattern_width {
+        for y in 0..pattern.height() {
+            composite.put_pixel(left_padding + x, y, *pattern.get_pixel(x, y));
+        }
+    }
+
+    (
+        DynamicImage::ImageRgb8(composite),
+        opts,
+        left_padding..(left_padding + pattern_width),
+    )
+}
+
 /// Expected `data_top` for a default-options render: the height of one marker
 /// band (margin + 3 thin stripes + thick stripe + gaps = 184 px).
 fn expected_top(opts: &RenderOptions) -> u32 {
@@ -203,6 +244,15 @@ fn detect_markers_too_small_is_error() {
     assert!(
         detect_markers(&img).is_err(),
         "tiny image should return an error"
+    );
+}
+
+#[test]
+fn detect_markers_zero_width_is_error() {
+    let img = DynamicImage::ImageLuma8(GrayImage::new(0, 10));
+    assert!(
+        detect_markers(&img).is_err(),
+        "zero-width image should return an error"
     );
 }
 
@@ -387,17 +437,10 @@ fn detect_markers_single_column_image() {
 
 // ─── find_thick_stripe fallback (no dominant run → pick longest) ──────────────
 
-/// When no dark run in the marker zone is ≥ 3× the average of its neighbours,
-/// `find_thick_stripe` falls back to the longest run.  Verify this by
-/// constructing a column where all stripes have the same width (no clear
-/// dominant), and checking that marker detection still succeeds and returns
-/// self-consistent bounds.
-///
-/// The image is painted by hand: a 200-pixel-tall grayscale image with two
-/// groups of equal-width stripes in the top and bottom 30 % respectively, plus
-/// a white data area in between.
+/// Equal-width dark stripes do not contain a valid `PhonoPaper` thick-stripe
+/// marker, so detection must reject them.
 #[test]
-fn detect_markers_equal_stripe_widths_fallback_to_longest() {
+fn detect_markers_equal_stripe_widths_is_error() {
     // Layout (1 wide × 200 tall image):
     //  rows   0..10  — black (run A)
     //  rows  10..20  — white
@@ -432,30 +475,9 @@ fn detect_markers_equal_stripe_widths_fallback_to_longest() {
 
     let dyn_img = DynamicImage::ImageLuma8(img);
 
-    // With height = 200: top_limit = 60, bot_limit = 140.
-    // Top zone dark runs: A(0,10), B(20,10), C(40,10) → none is ≥ 3× avg → fallback picks first.
-    // Bottom zone dark runs: D(140,10), E(160,10), F(180,10) → same fallback → picks D.
-    let bounds = detect_markers_at_column(&dyn_img, 0)
-        .expect("detect_markers_at_column should succeed with equal-width stripes via fallback");
-
-    // With all stripes of equal width, max_by_key picks the LAST maximum (Rust tie-breaking).
-    // Top zone: runs A(0,10), B(20,10), C(40,10) → picks C (index 2) → top_idx = 2
-    //   data_top: dark_runs[top_idx + 1] = dark_runs[3] = D(140,10) → 140 + 10 = 150
-    // Bottom zone: runs D(140,10), E(160,10), F(180,10) → picks F (index 2) → bot_idx = 5
-    //   data_bottom: dark_runs[bot_idx - 1] = dark_runs[4] = E(160,10) → 160
     assert!(
-        bounds.data_top < bounds.data_bottom,
-        "data_top ({}) must be less than data_bottom ({})",
-        bounds.data_top,
-        bounds.data_bottom
-    );
-    assert_eq!(
-        bounds.data_top, 150,
-        "data_top should be 150 (end of run D)"
-    );
-    assert_eq!(
-        bounds.data_bottom, 160,
-        "data_bottom should be 160 (start of run E)"
+        detect_markers_at_column(&dyn_img, 0).is_err(),
+        "equal-width stripes should not be accepted as a valid marker pattern"
     );
 }
 
@@ -495,6 +517,72 @@ fn detect_markers_fewer_than_three_top_runs_is_error() {
         result.is_err(),
         "fewer than 3 dark runs in the top zone should return an error"
     );
+}
+
+#[test]
+fn detect_markers_reject_deterministic_noise() {
+    for &(width, height, seed) in &[
+        (200, 200, 1_u64),
+        (800, 484, 2),
+        (800, 1088, 3),
+        (100, 1000, 4),
+    ] {
+        let img = deterministic_noise_image(width, height, seed);
+        assert!(
+            detect_markers(&img).is_err(),
+            "noise image {width}×{height} with seed {seed} should not detect as PhonoPaper"
+        );
+    }
+}
+
+#[test]
+fn detect_markers_finds_embedded_pattern_amid_white_columns() {
+    let (img, opts, pattern_cols) = image_with_embedded_pattern(16, 40, 12, 12);
+    let bounds = detect_markers(&img).expect("embedded pattern should be detected");
+
+    assert_eq!(bounds.data_top, expected_top(&opts));
+    assert_eq!(bounds.data_bottom, expected_bottom(&opts));
+
+    let inside = pattern_cols.start + 2;
+    let outside_left = pattern_cols.start - 1;
+    let outside_right = pattern_cols.end;
+
+    let inside_bounds =
+        detect_markers_at_column(&img, inside).expect("pattern column should detect markers");
+    assert_eq!(inside_bounds.data_top, expected_top(&opts));
+    assert_eq!(inside_bounds.data_bottom, expected_bottom(&opts));
+    assert!(
+        detect_markers_at_column(&img, outside_left).is_err(),
+        "white column left of the embedded pattern should not detect markers"
+    );
+    assert!(
+        detect_markers_at_column(&img, outside_right).is_err(),
+        "white column right of the embedded pattern should not detect markers"
+    );
+}
+
+#[test]
+fn detect_markers_finds_embedded_pattern_amid_noise_columns() {
+    let opts = RenderOptions {
+        draw_octave_lines: false,
+        ..RenderOptions::default()
+    };
+    let pattern = spectrogram_to_image(&SpectrogramVec::new(16), &opts);
+    let left_padding = 20;
+    let right_padding = 20;
+    let total_width = left_padding + pattern.width() + right_padding;
+    let mut composite = deterministic_noise_image(total_width, pattern.height(), 99).into_rgb8();
+
+    for x in 0..pattern.width() {
+        for y in 0..pattern.height() {
+            composite.put_pixel(left_padding + x, y, *pattern.get_pixel(x, y));
+        }
+    }
+
+    let bounds =
+        detect_markers(&DynamicImage::ImageRgb8(composite)).expect("embedded pattern should win");
+    assert_eq!(bounds.data_top, expected_top(&opts));
+    assert_eq!(bounds.data_bottom, expected_bottom(&opts));
 }
 
 /// The `Display` impl for `PhonoPaperError::MarkerNotFound` includes the
