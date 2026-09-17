@@ -117,8 +117,8 @@ fn interpolate_bounds(
         .filter(|(_, bounds)| bounds.is_none())
         .count();
     let cluster = select_consistent_cluster(&sample_results)?;
-    let left = cluster.first().map(|(x, _)| *x).unwrap_or(0);
-    let right = cluster.last().map(|(x, _)| *x).unwrap_or(left);
+    let left = cluster.first().map_or(0, |(x, _)| *x);
+    let right = cluster.last().map_or(left, |(x, _)| *x);
 
     let detected: Vec<(u32, f32, f32)> = cluster
         .iter()
@@ -332,14 +332,14 @@ fn save_rectified_image(
     col_bounds: &[(f32, f32)],
     path: impl AsRef<Path>,
 ) -> Result<(), String> {
-    use image::GenericImageView as _;
     use imageproc::geometric_transformations::{Border, Interpolation, Projection, warp};
 
     if col_bounds.len() < 2 {
         return Err("Image too narrow to rectify.".to_string());
     }
 
-    let width = col_bounds.len() as u32;
+    let width = u32::try_from(col_bounds.len())
+        .map_err(|_| "Detected data area is too wide to rectify.".to_string())?;
     #[expect(
         clippy::cast_precision_loss,
         reason = "width - 1 is a pixel coordinate; converted to f32 for imageproc projection arithmetic"

@@ -33,10 +33,6 @@ fn deterministic_noise_image(width: u32, height: u32, seed: u64) -> DynamicImage
         state = state
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1);
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "the top byte of the PRNG state always fits in u8"
-        )]
         let value = (state >> 56) as u8;
         Luma([value])
     });
@@ -44,12 +40,16 @@ fn deterministic_noise_image(width: u32, height: u32, seed: u64) -> DynamicImage
 }
 
 fn image_with_embedded_pattern(
+    pattern_columns: usize,
     outer_width: u32,
     left_padding: u32,
     right_padding: u32,
 ) -> (DynamicImage, RenderOptions, std::ops::Range<u32>) {
-    let (pattern, opts) = default_phonopaper_image();
-    let pattern = pattern.into_rgb8();
+    let opts = RenderOptions {
+        draw_octave_lines: false,
+        ..RenderOptions::default()
+    };
+    let pattern = spectrogram_to_image(&SpectrogramVec::new(pattern_columns), &opts);
     let pattern_width = pattern.width();
     assert_eq!(outer_width, left_padding + pattern_width + right_padding);
 
@@ -244,6 +244,15 @@ fn detect_markers_too_small_is_error() {
     assert!(
         detect_markers(&img).is_err(),
         "tiny image should return an error"
+    );
+}
+
+#[test]
+fn detect_markers_zero_width_is_error() {
+    let img = DynamicImage::ImageLuma8(GrayImage::new(0, 10));
+    assert!(
+        detect_markers(&img).is_err(),
+        "zero-width image should return an error"
     );
 }
 
@@ -528,7 +537,7 @@ fn detect_markers_reject_deterministic_noise() {
 
 #[test]
 fn detect_markers_finds_embedded_pattern_amid_white_columns() {
-    let (img, opts, pattern_cols) = image_with_embedded_pattern(40, 12, 12);
+    let (img, opts, pattern_cols) = image_with_embedded_pattern(16, 40, 12, 12);
     let bounds = detect_markers(&img).expect("embedded pattern should be detected");
 
     assert_eq!(bounds.data_top, expected_top(&opts));
@@ -554,8 +563,11 @@ fn detect_markers_finds_embedded_pattern_amid_white_columns() {
 
 #[test]
 fn detect_markers_finds_embedded_pattern_amid_noise_columns() {
-    let (pattern, opts) = default_phonopaper_image();
-    let pattern = pattern.into_rgb8();
+    let opts = RenderOptions {
+        draw_octave_lines: false,
+        ..RenderOptions::default()
+    };
+    let pattern = spectrogram_to_image(&SpectrogramVec::new(16), &opts);
     let left_padding = 20;
     let right_padding = 20;
     let total_width = left_padding + pattern.width() + right_padding;
