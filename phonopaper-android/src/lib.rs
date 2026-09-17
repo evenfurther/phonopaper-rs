@@ -4,11 +4,12 @@
 //! Rust so the mobile application can share the same decoding logic as the
 //! workspace library.
 
+use std::ptr;
+
 use image::DynamicImage;
 use jni::{
     Env, EnvUnowned,
     errors::ThrowRuntimeExAndDefault,
-    JNIEnv,
     objects::{JByteArray, JClass},
     sys::{jintArray, jshortArray},
 };
@@ -111,8 +112,16 @@ pub extern "system" fn java_decode_image_to_pcm(
     _class: JClass,
     image_bytes: JByteArray,
 ) -> jshortArray {
-    env.with_env(|env| decode_image_to_pcm_array(env, image_bytes))
-        .resolve::<ThrowRuntimeExAndDefault>()
+    env.with_env(|env| -> jni::errors::Result<_> {
+        match decode_image_to_pcm_array(env, image_bytes) {
+            Ok(array) => Ok(array),
+            Err(message) => {
+                let _ = env.throw(message);
+                Ok(ptr::null_mut())
+            }
+        }
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 /// JNI entry point used by the Android application to detect preview bounds.
@@ -123,8 +132,16 @@ pub extern "system" fn java_detect_preview_bounds(
     _class: JClass,
     image_bytes: JByteArray,
 ) -> jintArray {
-    env.with_env(|env| detect_preview_bounds_array(env, image_bytes))
-        .resolve::<ThrowRuntimeExAndDefault>()
+    env.with_env(|env| -> jni::errors::Result<_> {
+        match detect_preview_bounds_array(env, image_bytes) {
+            Ok(array) => Ok(array),
+            Err(message) => {
+                let _ = env.throw(message);
+                Ok(ptr::null_mut())
+            }
+        }
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 fn decode_image_to_pcm_array(
@@ -135,10 +152,11 @@ fn decode_image_to_pcm_array(
         .convert_byte_array(image_bytes)
         .map_err(|err| err.to_string())?;
     let pcm = decode_image_to_pcm(&bytes)?;
-    let len =
-        i32::try_from(pcm.len()).map_err(|_| "Decoded audio is too large for JNI.".to_string())?;
-    let output = env.new_short_array(len).map_err(|err| err.to_string())?;
-    env.set_short_array_region(&output, 0, &pcm)
+    let output = env
+        .new_short_array(pcm.len())
+        .map_err(|err| err.to_string())?;
+    output
+        .set_region(env, 0, &pcm)
         .map_err(|err| err.to_string())?;
 
     Ok(output.into_raw())
@@ -160,7 +178,8 @@ fn detect_preview_bounds_array(
     let bottom = i32::try_from(bottom)
         .map_err(|_| "Detected bottom bound does not fit in JNI.".to_string())?;
     let output = env.new_int_array(2).map_err(|err| err.to_string())?;
-    env.set_int_array_region(&output, 0, &[top, bottom])
+    output
+        .set_region(env, 0, &[top, bottom])
         .map_err(|err| err.to_string())?;
 
     Ok(output.into_raw())

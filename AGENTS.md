@@ -191,16 +191,16 @@ cargo llvm-cov -p phonopaper-rs --tests --ignore-filename-regex='(benches|exampl
 
 | File | Regions | Functions | Lines |
 |---|---|---|---|
-| `audio.rs`           | 87.21 % |  69.23 % |  81.68 % |
+| `audio.rs`           | 86.19 % |  66.67 % |  79.07 % |
 | `decode/image.rs`    | 98.39 % | 100.00 % | 100.00 % |
 | `decode/markers.rs`  | 98.87 % | 100.00 % |  96.33 % |
-| `decode/synth.rs`    | 96.17 % | 100.00 % |  94.74 % |
+| `decode/synth.rs`    | 96.14 % | 100.00 % |  94.74 % |
 | `decode/wav.rs`      | 81.51 % |  75.00 % |  88.24 % |
 | `encode.rs`          | 97.48 % | 100.00 % |  99.00 % |
 | `format.rs`          |100.00 % | 100.00 % | 100.00 % |
 | `render.rs`          |100.00 % | 100.00 % | 100.00 % |
 | `spectrogram.rs`     | 96.08 % | 100.00 % |  97.44 % |
-| `vector.rs`          | 96.13 % |  87.10 % |  91.92 % |
+| `vector.rs`          | 96.35 % |  87.10 % |  92.57 % |
 | **TOTAL**            | **95.49 %** | **91.89 %** | **93.90 %** |
 
 A change is acceptable if **every file stays at or above its baseline** for all
