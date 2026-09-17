@@ -189,6 +189,12 @@ cargo llvm-cov -p phonopaper-rs --tests --ignore-filename-regex='(benches|exampl
 
 **Coverage baselines:**
 
+The table below records the validated steady-state output of the canonical
+coverage command on the current dependency set.  Small shifts can occur when
+toolchain or dependency upgrades change LLVM's region accounting even without
+source edits; when that happens, refresh the table from the command output so
+the documented baselines stay in sync with the repository.
+
 | File | Regions | Functions | Lines |
 |---|---|---|---|
 | `audio.rs`           | 86.19 % |  66.67 % |  79.07 % |
