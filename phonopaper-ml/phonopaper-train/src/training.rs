@@ -9,9 +9,14 @@ use burn::prelude::*;
 use burn::record::{BinFileRecorder, FullPrecisionSettings, NamedMpkFileRecorder};
 use burn::tensor::activation::log_sigmoid;
 use burn::tensor::backend::AutodiffBackend;
+use burn::train::checkpoint::{
+    ComposedCheckpointingStrategy, KeepLastNCheckpoints, MetricCheckpointingStrategy,
+};
 use burn::train::metric::LossMetric;
+use burn::train::metric::store::{Aggregate, Direction, Split as MetricSplit};
 use burn::train::{
-    InferenceStep, Learner, RegressionOutput, SupervisedTraining, TrainOutput, TrainStep,
+    InferenceStep, Learner, MetricEarlyStoppingStrategy, RegressionOutput, StoppingCondition,
+    SupervisedTraining, TrainOutput, TrainStep,
 };
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +44,7 @@ const HUBER_DELTA: f64 = 0.05;
 
 /// Training hyper-parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TrainingConfig {
     /// Network hyper-parameters.
     pub model: DetectorConfig,
@@ -54,6 +60,8 @@ pub struct TrainingConfig {
     pub seed: u64,
     /// Adam learning rate.
     pub learning_rate: f64,
+    /// Stop when the validation loss has not improved for this many epochs.
+    pub patience: usize,
 }
 
 impl Default for TrainingConfig {
@@ -66,6 +74,7 @@ impl Default for TrainingConfig {
             num_workers: 4,
             seed: 42,
             learning_rate: 1e-3,
+            patience: 8,
         }
     }
 }
@@ -191,37 +200,183 @@ pub fn train<B: AutodiffBackend>(
         .metric_train_numeric(LossMetric::new())
         .metric_valid_numeric(LossMetric::new())
         .with_file_checkpointer(NamedMpkFileRecorder::<FullPrecisionSettings>::new())
+        // Keep the two most recent checkpoints plus the best-validation one.
+        .with_checkpointing_strategy(
+            ComposedCheckpointingStrategy::builder()
+                .add(KeepLastNCheckpoints::new(2))
+                .add(MetricCheckpointingStrategy::new(
+                    &LossMetric::<B>::new(),
+                    Aggregate::Mean,
+                    Direction::Lowest,
+                    MetricSplit::Valid,
+                ))
+                .build(),
+        )
+        .early_stopping(MetricEarlyStoppingStrategy::new(
+            &LossMetric::<B>::new(),
+            Aggregate::Mean,
+            Direction::Lowest,
+            MetricSplit::Valid,
+            StoppingCondition::NoImprovementSince {
+                n_epochs: config.patience,
+            },
+        ))
         .num_epochs(config.num_epochs)
         .summary();
 
     let model = config.model.init::<B>(device);
-    let result = training.launch(Learner::new(
+    // The trained model returned here lives on the training backend; we do
+    // not read it back (GPU read-back has proven fragile).  The checkpoints
+    // on disk are the source of truth for the export below.
+    let _ = training.launch(Learner::new(
         model,
         config.optimizer.init(),
         config.learning_rate,
     ));
 
-    let trained = result.model;
-    trained
+    let best = best_epoch(artifact_dir)?;
+    println!("best validation loss at epoch {best}; exporting it");
+    export_checkpoint(artifact_dir, Some(best))
+}
+
+/// Mean validation loss per epoch, read from burn's metric logs
+/// (`<artifacts>/valid/epoch-N/Loss.log`).
+///
+/// # Errors
+///
+/// Returns a message when no validation log can be found.
+pub fn validation_losses(artifact_dir: &Path) -> Result<Vec<(usize, f64)>, String> {
+    let valid_dir = artifact_dir.join("valid");
+    let entries =
+        std::fs::read_dir(&valid_dir).map_err(|e| format!("{}: {e}", valid_dir.display()))?;
+    let mut losses = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name();
+        let Some(epoch) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("epoch-"))
+            .and_then(|n| n.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        let log = entry.path().join("Loss.log");
+        let Ok(text) = std::fs::read_to_string(&log) else {
+            continue;
+        };
+        let values: Vec<f64> = text
+            .lines()
+            .filter_map(|l| l.split(',').next()?.trim().parse().ok())
+            .collect();
+        if !values.is_empty() {
+            #[expect(clippy::cast_precision_loss, reason = "batch counts are small")]
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            losses.push((epoch, mean));
+        }
+    }
+    if losses.is_empty() {
+        return Err(format!(
+            "no validation logs found under {}",
+            valid_dir.display()
+        ));
+    }
+    losses.sort_by_key(|&(epoch, _)| epoch);
+    Ok(losses)
+}
+
+/// Epoch with the lowest mean validation loss.
+///
+/// # Errors
+///
+/// See [`validation_losses`].
+pub fn best_epoch(artifact_dir: &Path) -> Result<usize, String> {
+    validation_losses(artifact_dir)?
+        .into_iter()
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(epoch, _)| epoch)
+        .ok_or_else(|| "no validation losses".to_owned())
+}
+
+/// Path (without extension) of the checkpoint written for `epoch`.
+#[must_use]
+pub fn checkpoint_path(artifact_dir: &Path, epoch: usize) -> std::path::PathBuf {
+    artifact_dir
+        .join("checkpoint")
+        .join(format!("model-{epoch}"))
+}
+
+/// Convert a training checkpoint into `model.bin`, entirely on the CPU.
+///
+/// `epoch` defaults to the epoch with the best validation loss.  The
+/// checkpoint must still exist in `<artifacts>/checkpoint/` (training keeps
+/// the best one and the two most recent).
+///
+/// # Errors
+///
+/// Returns a message when the checkpoint or `model.json` is missing or
+/// cannot be read/written.
+pub fn export_checkpoint(artifact_dir: &Path, epoch: Option<usize>) -> Result<(), String> {
+    type Cpu = burn::backend::NdArray;
+    let device = burn::backend::ndarray::NdArrayDevice::Cpu;
+
+    let epoch = match epoch {
+        Some(e) => e,
+        None => best_epoch(artifact_dir)?,
+    };
+    let config_path = artifact_dir.join(MODEL_CONFIG_FILE);
+    let model_config = DetectorConfig::load(&config_path)
+        .map_err(|e| format!("{}: {e}", config_path.display()))?;
+    let ckpt = checkpoint_path(artifact_dir, epoch);
+    if !ckpt.with_extension("mpk").is_file() {
+        return Err(format!(
+            "checkpoint {} does not exist (available: {})",
+            ckpt.with_extension("mpk").display(),
+            available_checkpoints(artifact_dir).join(", ")
+        ));
+    }
+    let model = model_config
+        .init::<Cpu>(&device)
+        .load_file(
+            &ckpt,
+            &NamedMpkFileRecorder::<FullPrecisionSettings>::new(),
+            &device,
+        )
+        .map_err(|e| format!("{}: {e}", ckpt.display()))?;
+    model
         .clone()
         .save_file(
             artifact_dir.join(CHECKPOINT_FILE),
             &NamedMpkFileRecorder::<FullPrecisionSettings>::new(),
         )
         .map_err(|e| e.to_string())?;
-    trained
+    model
         .save_file(
             artifact_dir.join(EXPORT_FILE),
             &BinFileRecorder::<FullPrecisionSettings>::new(),
         )
         .map_err(|e| e.to_string())?;
     println!(
-        "saved {} and {} in {}",
+        "exported epoch {epoch} to {} and {} in {}",
         CHECKPOINT_FILE,
         EXPORT_FILE,
         artifact_dir.display()
     );
     Ok(())
+}
+
+/// Names of the model checkpoints present in `<artifacts>/checkpoint/`.
+#[must_use]
+pub fn available_checkpoints(artifact_dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(artifact_dir.join("checkpoint")) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+        .filter(|n| n.starts_with("model-"))
+        .collect();
+    names.sort();
+    names
 }
 
 /// Load a trained detector from an artifact directory (`model.json` +
@@ -234,14 +389,26 @@ pub fn load_trained<B: Backend>(
     artifact_dir: &Path,
     device: &B::Device,
 ) -> Result<Detector<B>, String> {
-    let model_config =
-        DetectorConfig::load(artifact_dir.join(MODEL_CONFIG_FILE)).map_err(|e| e.to_string())?;
+    let config_path = artifact_dir.join(MODEL_CONFIG_FILE);
+    let weights_path = artifact_dir.join(EXPORT_FILE);
+    for path in [&config_path, &weights_path] {
+        if !path.is_file() {
+            return Err(format!(
+                "{} not found; run `train` to completion, or `export [--epoch N]` to convert a \
+                 checkpoint from {}",
+                path.display(),
+                artifact_dir.join("checkpoint").display()
+            ));
+        }
+    }
+    let model_config = DetectorConfig::load(&config_path)
+        .map_err(|e| format!("{}: {e}", config_path.display()))?;
     model_config
         .init::<B>(device)
         .load_file(
-            artifact_dir.join(EXPORT_FILE),
+            &weights_path,
             &BinFileRecorder::<FullPrecisionSettings>::new(),
             device,
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("{}: {e}", weights_path.display()))
 }

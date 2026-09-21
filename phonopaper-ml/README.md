@@ -115,7 +115,7 @@ white margins are not included.
 |---|---|---|
 | *(default)* `flex` | CPU | Pure Rust, works everywhere; ~3 s per batch of 32 |
 | `--no-default-features --features wgpu` | GPU via Vulkan/Metal/DX12 | Needs only the graphics driver; ~0.35 s per batch on an RTX A2000 at full clocks |
-| `--no-default-features --features cuda` | NVIDIA GPU | Needs the CUDA toolkit (`libnvrtc`) installed |
+| `--no-default-features --features cuda` | NVIDIA GPU | Needs the CUDA toolkit (`libnvrtc`) installed; `fusion` is intentionally off (see `Cargo.toml`) |
 | `--no-default-features --features ndarray` | CPU | Legacy backend, ~10× slower than `flex` |
 | add `--features tui` | — | Interactive terminal dashboard instead of plain logs |
 
@@ -146,9 +146,37 @@ cargo run --release -p phonopaper-train --no-default-features --features wgpu --
 | `--seed <U64>` | `42` | Weight initialisation / shuffling seed |
 | `--workers <N>` | `4` | Data-loader threads |
 | `--input-size <PX>` | `128` | Network input side; must equal the dataset `--size` |
+| `--patience <N>` | `8` | Stop early when the validation loss has not improved for N epochs |
 
 Images whose index is a multiple of 10 form the **validation split**; the
 rest is the training split.
+
+Training keeps the two most recent checkpoints **and the one with the best
+validation loss** in `artifacts/checkpoint/`.  When training ends (after
+`--epochs` or by early stopping), the best-validation epoch is exported to
+`model.bin` — the export runs on the CPU, independently of the training
+backend.
+
+### Recovering a model from checkpoints
+
+If a run was interrupted, or you want a specific epoch:
+
+```bash
+cargo run --release -p phonopaper-train -- export --artifacts artifacts            # best validation epoch
+cargo run --release -p phonopaper-train -- export --artifacts artifacts --epoch 12 # a specific epoch
+```
+
+`export` prints the mean validation loss of every epoch it can find in
+`artifacts/valid/`, then writes `model.mpk` and `model.bin`.  Only epochs
+still present in `artifacts/checkpoint/` can be exported.
+
+### Overfitting
+
+Synthetic data is cheap, so the remedy for a validation loss that rises
+while the training loss keeps falling is simply **more images**: a 30 k
+dataset overfits within ~12 epochs, a 300 k one (≈ 3 GB, minutes to
+generate) does not.  Early stopping (`--patience`) and best-epoch export
+make sure an over-long run still yields the best model.
 
 ### How much data / how long?
 
@@ -171,8 +199,9 @@ The artifact directory receives burn's logs and per-epoch checkpoints plus:
 |---|---|
 | `model.json` | `DetectorConfig` (input size, hidden width, dropout) |
 | `training.json` | All training hyper-parameters |
-| `model.mpk` | Full-precision checkpoint (`NamedMpkFileRecorder`) |
+| `model.mpk` | Full-precision copy of the exported epoch (`NamedMpkFileRecorder`) |
 | `model.bin` | **Weights to embed** (`BinFileRecorder`, full precision, ≈ 2 MB) |
+| `checkpoint/` | Per-epoch checkpoints (best validation epoch + two most recent) |
 
 ### The network
 
