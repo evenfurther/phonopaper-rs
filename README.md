@@ -29,6 +29,7 @@ This repository contains a Cargo workspace plus an Android app:
 | `phonopaper-cli` | `phonopaper-cli/` | `phonopaper` binary — four subcommands |
 | `phonopaper-android` | `phonopaper-android/` | JNI bridge crate that exposes Rust decoding to Android |
 | Android app | `android-app/` | Kotlin UI with live camera preview, capture/manual scrubbing controls, and a Rust-backed decoder |
+| ML tooling | `phonopaper-ml/` | Separate workspace: deterministic synthetic dataset generator and a [burn](https://burn.dev) trainer for a neural-network pattern detector — see [`phonopaper-ml/README.md`](phonopaper-ml/README.md) |
 
 ---
 
@@ -360,6 +361,16 @@ cd android-app
 ```
 
 The produced release APK is intended for test installs, not store distribution.
+
+The machine-learning tooling in `phonopaper-ml/` is its own workspace and has
+the same formatting / clippy / test gates:
+
+```bash
+cd phonopaper-ml
+cargo fmt --check --all
+cargo clippy --workspace --all-targets
+cargo test --workspace
+```
 
 Coverage (informational, not a hard gate):
 
