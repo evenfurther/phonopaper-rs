@@ -5,7 +5,9 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use phonopaper_train::model::DetectorConfig;
-use phonopaper_train::training::{TrainingConfig, load_trained, train};
+use phonopaper_train::training::{
+    TrainingConfig, export_checkpoint, load_trained, train, validation_losses,
+};
 use phonopaper_train::{eval, infer};
 
 // ─── Backend selection ────────────────────────────────────────────────────────
@@ -86,6 +88,23 @@ enum Command {
         /// Network input side in pixels; must match the dataset `--size`.
         #[arg(long, default_value_t = 128)]
         input_size: usize,
+        /// Stop early when the validation loss has not improved for this
+        /// many epochs.
+        #[arg(long, default_value_t = 8)]
+        patience: usize,
+    },
+    /// Convert a training checkpoint into `model.bin` (on the CPU).
+    ///
+    /// Use this to recover a model when training was interrupted, or to pick
+    /// a specific epoch.  Without `--epoch`, the epoch with the lowest mean
+    /// validation loss is used.
+    Export {
+        /// Artifact directory of a `train` run.
+        #[arg(short, long, default_value = "artifacts")]
+        artifacts: PathBuf,
+        /// Epoch to export; must still exist in `<artifacts>/checkpoint/`.
+        #[arg(long)]
+        epoch: Option<usize>,
     },
     /// Evaluate a trained detector on the validation split of a dataset.
     Eval {
@@ -126,6 +145,7 @@ fn run(cli: Cli) -> Result<(), String> {
             seed,
             workers,
             input_size,
+            patience,
         } => {
             let config = TrainingConfig {
                 model: DetectorConfig::new().with_input_size(input_size),
@@ -134,9 +154,16 @@ fn run(cli: Cli) -> Result<(), String> {
                 learning_rate,
                 seed,
                 num_workers: workers,
+                patience,
                 ..TrainingConfig::default()
             };
             train::<Training>(&dataset, &artifacts, &config, &device)
+        }
+        Command::Export { artifacts, epoch } => {
+            for (e, loss) in validation_losses(&artifacts).unwrap_or_default() {
+                println!("epoch {e:>3}: mean validation loss {loss:.4}");
+            }
+            export_checkpoint(&artifacts, epoch)
         }
         Command::Eval {
             dataset,

@@ -19,13 +19,17 @@ flex = ["burn/flex"]
 ndarray = ["burn/ndarray"]
 # GPU backend through wgpu (Vulkan / Metal / DX12).
 wgpu = ["burn/wgpu", "burn/fusion"]
-# NVIDIA GPU backend.
-cuda = ["burn/cuda", "burn/fusion"]
+# NVIDIA GPU backend.  `fusion` is deliberately left out: with burn 0.21 the
+# fused CUDA read-back kernel can be generated with an invalid 16-wide vector
+# ("Invalid vector size. Got 16 which should not be >8") and crash the run.
+cuda = ["burn/cuda"]
 # Interactive terminal dashboard during training.
 tui = ["burn/tui"]
 
 [dependencies]
-burn = { version = "0.21", default-features = false, features = ["std", "train", "autodiff"] }
+# `ndarray` is always enabled: checkpoints are exported to `model.bin` on the
+# CPU so that the export path never depends on the training backend.
+burn = { version = "0.21", default-features = false, features = ["std", "train", "autodiff", "ndarray"] }
 # Label / manifest formats shared with the generator.
 phonopaper-dataset = { path = "../phonopaper-dataset" }
 # Dataset loading (PNG only)
