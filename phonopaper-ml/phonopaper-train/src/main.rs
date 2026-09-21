@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use phonopaper_train::data::Split;
 use phonopaper_train::model::DetectorConfig;
 use phonopaper_train::training::{
     TrainingConfig, export_checkpoint, load_trained, train, validation_losses,
@@ -106,7 +107,7 @@ enum Command {
         #[arg(long)]
         epoch: Option<usize>,
     },
-    /// Evaluate a trained detector on the validation split of a dataset.
+    /// Evaluate a trained detector on one split of a dataset.
     Eval {
         /// Dataset directory.
         #[arg(short, long, default_value = "dataset")]
@@ -117,6 +118,10 @@ enum Command {
         /// Mini-batch size.
         #[arg(long, default_value_t = 64)]
         batch_size: usize,
+        /// Which split to evaluate: `valid` (default) or `train`.  Comparing
+        /// both tells under-fitting apart from over-fitting.
+        #[arg(long, default_value = "valid")]
+        split: String,
     },
     /// Run a trained detector on image files and print JSON results.
     Infer {
@@ -169,9 +174,16 @@ fn run(cli: Cli) -> Result<(), String> {
             dataset,
             artifacts,
             batch_size,
+            split,
         } => {
+            let split = match split.as_str() {
+                "valid" => Split::Valid,
+                "train" => Split::Train,
+                other => return Err(format!("--split must be `valid` or `train`, got {other:?}")),
+            };
             let model = load_trained::<backend::Inference>(&artifacts, &device)?;
-            let metrics = eval::evaluate(&model, &dataset, batch_size, &device)?;
+            let metrics = eval::evaluate(&model, &dataset, split, batch_size, &device)?;
+            println!("split: {split:?}");
             println!("{metrics}");
             Ok(())
         }
