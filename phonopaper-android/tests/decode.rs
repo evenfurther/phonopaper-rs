@@ -38,14 +38,14 @@ fn decode_generated_phonopaper_image() {
     let image = spectrogram_to_image(&spectrogram, &RenderOptions::default());
     let png = encode_png(&image::DynamicImage::ImageRgb8(image));
     let pcm = decode_image_to_pcm(&png).expect("decode generated image");
-    assert!(!pcm.is_empty());
+    assert_ne!(pcm.len(), 0, "decoded audio must not be empty");
     assert!(pcm.iter().any(|&sample| sample != 0));
 }
 
 #[test]
 fn reject_invalid_image_bytes() {
     let err = decode_image_to_pcm(b"not an image").expect_err("invalid input should fail");
-    assert!(!err.is_empty());
+    assert_ne!(err.len(), 0, "error message must not be empty");
 }
 
 #[test]

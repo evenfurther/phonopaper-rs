@@ -34,21 +34,33 @@ phonopaper-rs/           ← repo root (workspace)
 ├── phonopaper-android/  ← Rust `cdylib` JNI bridge for Android
 │   ├── Cargo.toml
 │   └── src/lib.rs
-└── android-app/         ← Kotlin Android app that calls the Rust bridge
-    ├── build.gradle
-    ├── settings.gradle
-    ├── gradlew
-    └── app/
-        ├── build.gradle
-        └── src/main/
-            ├── AndroidManifest.xml
-            ├── java/com/evenfurther/phonopaper/
-            └── res/
+├── android-app/         ← Kotlin Android app that calls the Rust bridge
+│   ├── build.gradle
+│   ├── settings.gradle
+│   ├── gradlew
+│   └── app/
+│       ├── build.gradle
+│       └── src/main/
+│           ├── AndroidManifest.xml
+│           ├── java/com/evenfurther/phonopaper/
+│           └── res/
+└── phonopaper-ml/       ← SEPARATE workspace (excluded from the root one)
+    ├── Cargo.toml       ← [workspace] with its own lock file
+    ├── README.md        ← dataset → training → model-transfer instructions
+    ├── phonopaper-dataset/  ← deterministic synthetic dataset generator
+    └── phonopaper-train/    ← burn model, training, eval, inference
 ```
 
 Workspace-level lints (`[workspace.lints.clippy] pedantic = "warn"`) are
 inherited by both crates via `[lints] workspace = true` in each member's
 `Cargo.toml`.
+
+`phonopaper-ml/` is deliberately **not** a member of the root workspace: the
+`burn` dependency tree is large and must not affect the library's lock file,
+build times or coverage.  It is listed under `[workspace] exclude` in the root
+`Cargo.toml` and has the same lint configuration.  Its dataset generator
+depends on `phonopaper-rs` by path so that patterns are rendered by the real
+encoder.
 
 ## Version control
 
@@ -108,6 +120,22 @@ cd android-app
 ```
 
 This verifies the Android Gradle project, JNI bridge, and APK packaging path used by CI.
+
+When a task changes `phonopaper-ml/`, also run (from that directory) the same
+three checks in that workspace:
+
+```bash
+cd phonopaper-ml
+cargo fmt --check --all
+cargo clippy --workspace --all-targets
+cargo test --workspace
+```
+
+The dataset generator must stay **bit-for-bit deterministic**: do not
+introduce `rand`, `HashMap` iteration order, transcendental float functions
+(`sin`, `exp`, `powf`, …) or thread-order-dependent state into it.  The
+`tests/dataset.rs` determinism test must keep passing.  Keep
+`phonopaper-ml/README.md` in sync with the CLI options and the model layout.
 
 > **Performance gate:** after running `cargo bench`, compare the results against
 > the baseline below.  A change is acceptable if every benchmark stays within
