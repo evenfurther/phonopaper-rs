@@ -85,6 +85,12 @@ impl Default for TrainingConfig {
 /// * corners: smooth-L1 between predicted and true normalised coordinates,
 ///   averaged over the positive samples only (there is no meaningful corner
 ///   target for negatives).
+///
+/// A `PhonoPaper` sheet is symmetric under a 180° rotation (the bottom
+/// marker band mirrors the top one), so the labelled order `TL, TR, BR, BL`
+/// and its rotation `BR, BL, TL, TR` describe the same picture.  The corner
+/// term is therefore the **minimum over both orderings**, which lets the
+/// network commit to one of them instead of averaging them.
 pub fn detection_loss<B: Backend>(output: Tensor<B, 2>, targets: Tensor<B, 2>) -> Tensor<B, 1> {
     let logits = output.clone().narrow(1, 0, 1);
     let present = targets.clone().narrow(1, 0, 1);
@@ -93,17 +99,34 @@ pub fn detection_loss<B: Backend>(output: Tensor<B, 2>, targets: Tensor<B, 2>) -
         .neg()
         .mean();
 
-    let diff = output.narrow(1, 1, 8) - targets.narrow(1, 1, 8);
-    let abs = diff.abs();
-    let quadratic = abs.clone().clamp_max(HUBER_DELTA);
-    let huber = quadratic.clone().powi_scalar(2).mul_scalar(0.5)
-        + (abs - quadratic).mul_scalar(HUBER_DELTA);
-    // Per-sample mean over the 8 coordinates, then mask negatives.
-    let per_sample = huber.mean_dim(1) * present.clone();
+    let predicted = output.narrow(1, 1, 8);
+    let truth = targets.narrow(1, 1, 8);
+    let direct = corner_huber(predicted.clone(), truth.clone());
+    let rotated = corner_huber(predicted, rotate_180(truth));
+    // Per-sample best ordering, then mask negatives.
+    let per_sample = direct.min_pair(rotated) * present.clone();
     let positives = present.sum().clamp_min(1.0);
     let corner = per_sample.sum() / positives;
 
     bce + corner.mul_scalar(CORNER_LOSS_WEIGHT)
+}
+
+/// Per-sample mean smooth-L1 between two `[batch, 8]` corner tensors →
+/// `[batch, 1]`.
+fn corner_huber<B: Backend>(predicted: Tensor<B, 2>, truth: Tensor<B, 2>) -> Tensor<B, 2> {
+    let abs = (predicted - truth).abs();
+    let quadratic = abs.clone().clamp_max(HUBER_DELTA);
+    let huber = quadratic.clone().powi_scalar(2).mul_scalar(0.5)
+        + (abs - quadratic).mul_scalar(HUBER_DELTA);
+    huber.mean_dim(1)
+}
+
+/// Reorder `[batch, 8]` corners `TL, TR, BR, BL` into `BR, BL, TL, TR` — the
+/// same quadrilateral seen from a sheet turned by 180°.
+pub fn rotate_180<B: Backend>(corners: Tensor<B, 2>) -> Tensor<B, 2> {
+    let first_half = corners.clone().narrow(1, 0, 4);
+    let second_half = corners.narrow(1, 4, 4);
+    Tensor::cat(vec![second_half, first_half], 1)
 }
 
 impl<B: Backend> Detector<B> {

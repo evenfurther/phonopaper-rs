@@ -21,7 +21,8 @@ pub struct FileDetection {
     pub probability: f32,
     /// `true` when `probability ≥ threshold`.
     pub present: bool,
-    /// Corners `[TL, TR, BR, BL]` as `[x, y]` in **original image pixels**.
+    /// Corners `[TL, TR, BR, BL]` as `[x, y]` in **original image pixels**,
+    /// in canonical order (see `Detection::canonical`).
     pub corners: [[f32; 2]; 4],
 }
 
@@ -51,7 +52,7 @@ pub fn infer_file<B: Backend>(
     let img = image::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let size = u32::try_from(model.input_size()).map_err(|e| e.to_string())?;
     let pixels = prepare_image(&img, size);
-    let det = model.detect(&pixels, device);
+    let det = model.detect(&pixels, device).canonical();
     #[expect(
         clippy::cast_precision_loss,
         reason = "image dimensions are far below 2^24"

@@ -21,7 +21,11 @@
 //! | index | meaning |
 //! |---|---|
 //! | `0`      | presence **logit** (apply a sigmoid to get a probability) |
-//! | `1..=8`  | `x0 y0 x1 y1 x2 y2 x3 y3` — corners **normalised by the input side** (`0.0` = left/top edge, `1.0` = right/bottom edge), in pattern order TL, TR, BR, BL |
+//! | `1..=8`  | `x0 y0 x1 y1 x2 y2 x3 y3` — corners **normalised by the input side** (`0.0` = left/top edge, `1.0` = right/bottom edge), clockwise, with `(x0,y0)→(x1,y1)` and `(x2,y2)→(x3,y3)` being the two marker-band edges |
+//!
+//! Because a sheet is symmetric under a 180° turn, the network may return
+//! either `TL, TR, BR, BL` or `BR, BL, TL, TR`; use [`Detection::canonical`]
+//! for a deterministic choice.
 
 use burn::nn::conv::{Conv2d, Conv2dConfig};
 use burn::nn::pool::{MaxPool2d, MaxPool2dConfig};
@@ -185,6 +189,40 @@ impl Detection {
     #[must_use]
     pub fn corners_in_pixels(&self, width: f32, height: f32) -> [[f32; 2]; 4] {
         self.corners.map(|[x, y]| [x * width, y * height])
+    }
+
+    /// The same quadrilateral with corners rotated by two positions
+    /// (`BR, BL, TL, TR`) — the sheet seen upside down.
+    #[must_use]
+    pub fn rotated_180(&self) -> Self {
+        let c = self.corners;
+        Self {
+            probability: self.probability,
+            corners: [c[2], c[3], c[0], c[1]],
+        }
+    }
+
+    /// Canonical ordering: of the two equivalent orderings, the one whose
+    /// first corner is higher in the image (smaller `y`; ties broken by
+    /// smaller `x`).
+    ///
+    /// A `PhonoPaper` sheet looks identical when turned by 180°, so the
+    /// network's choice between `TL, TR, BR, BL` and `BR, BL, TL, TR` is
+    /// arbitrary; this picks a deterministic one.  Which end is really the
+    /// top (high frequencies) cannot be recovered from the image alone.
+    #[must_use]
+    pub fn canonical(&self) -> Self {
+        let [a, b] = [self.corners[0], self.corners[2]];
+        let first_is_higher = match a[1].total_cmp(&b[1]) {
+            std::cmp::Ordering::Less => true,
+            std::cmp::Ordering::Greater => false,
+            std::cmp::Ordering::Equal => a[0] <= b[0],
+        };
+        if first_is_higher {
+            *self
+        } else {
+            self.rotated_180()
+        }
     }
 }
 
