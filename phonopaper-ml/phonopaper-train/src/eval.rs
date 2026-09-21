@@ -51,7 +51,7 @@ impl std::fmt::Display for Metrics {
     }
 }
 
-/// Evaluate `model` on the validation split of `dataset_dir`.
+/// Evaluate `model` on one split of `dataset_dir`.
 ///
 /// # Errors
 ///
@@ -60,10 +60,11 @@ impl std::fmt::Display for Metrics {
 pub fn evaluate<B: Backend>(
     model: &Detector<B>,
     dataset_dir: &Path,
+    split: Split,
     batch_size: usize,
     device: &B::Device,
 ) -> Result<Metrics, String> {
-    let (valid, size) = load_split(dataset_dir, Split::Valid)?;
+    let (valid, size) = load_split(dataset_dir, split)?;
     if size != model.input_size() {
         return Err(format!(
             "dataset images are {size} px but the model expects {} px",
@@ -91,12 +92,25 @@ pub fn evaluate<B: Backend>(
             match (predicted, truth) {
                 (true, true) => {
                     tp += 1;
-                    for k in 0..4 {
-                        let dx =
-                            f64::from(det.corners[k][0] - item.target[1 + 2 * k]) * px_per_unit;
-                        let dy =
-                            f64::from(det.corners[k][1] - item.target[2 + 2 * k]) * px_per_unit;
-                        let err = (dx * dx + dy * dy).sqrt();
+                    // Either orientation of the sheet is a correct answer;
+                    // score against the closer one (mirrors the loss).
+                    let truth: [[f32; 2]; 4] =
+                        std::array::from_fn(|k| [item.target[1 + 2 * k], item.target[2 + 2 * k]]);
+                    let errors = |pred: &[[f32; 2]; 4]| -> [f64; 4] {
+                        std::array::from_fn(|k| {
+                            let dx = f64::from(pred[k][0] - truth[k][0]) * px_per_unit;
+                            let dy = f64::from(pred[k][1] - truth[k][1]) * px_per_unit;
+                            (dx * dx + dy * dy).sqrt()
+                        })
+                    };
+                    let direct = errors(&det.corners);
+                    let rotated = errors(&det.rotated_180().corners);
+                    let best = if direct.iter().sum::<f64>() <= rotated.iter().sum::<f64>() {
+                        direct
+                    } else {
+                        rotated
+                    };
+                    for err in best {
                         corner_err_sum += err;
                         corners_total += 1;
                         within3 += usize::from(err <= 3.0);

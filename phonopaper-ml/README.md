@@ -100,10 +100,14 @@ file,present,x0,y0,x1,y1,x2,y2,x3,y3
 
 "Pattern orientation" means the order is defined on the printed sheet, not in
 the image: the edge `(x0,y0)→(x1,y1)` is always the outer edge of the **top
-marker band**, whatever the rotation.  A consumer therefore knows which way is
-up.  The corners delimit the *ink box* — from the first stripe of the top
-band to the last stripe of the bottom band, across all data columns — the
-white margins are not included.
+marker band**, whatever the rotation.  The corners delimit the *ink box* —
+from the first stripe of the top band to the last stripe of the bottom band,
+across all data columns — the white margins are not included.
+
+> Note that a `PhonoPaper` sheet looks identical when turned by 180°, so the
+> labels carry information the image itself does not (which end is the top).
+> The trainer accounts for this with a symmetric loss; see *Orientation
+> ambiguity* below.
 
 ---
 
@@ -220,17 +224,34 @@ edge; values slightly outside `[0, 1]` are legitimate).
 Loss = binary cross-entropy on the presence logit + 20 × smooth-L1 (δ = 0.05)
 on the corners, the latter averaged over positive samples only.
 
+#### Orientation ambiguity
+
+A `PhonoPaper` sheet is symmetric under a 180° turn: the bottom marker band
+is the mirror image of the top one and every stripe spans the full width.
+The image therefore cannot tell `TL, TR, BR, BL` from `BR, BL, TL, TR`.  The
+corner loss (and `eval`) take the **minimum over both orderings**, so the
+network is free to commit to either; without this the network hedges towards
+the average of the two — the pattern centre — and corner errors of ~20 px
+result.  At inference, `Detection::canonical()` picks the ordering whose first
+corner is higher in the image.  What the network *does* tell you is which two
+edges carry the marker bands (`c0→c1` and `c2→c3`); which of them is the
+high-frequency end must come from elsewhere (the phone's orientation, or
+decoding both ways and keeping the one that sounds right).
+
 ---
 
 ## 3. Evaluate and try the model
 
 ```bash
 cargo run --release -p phonopaper-train -- eval --dataset dataset --artifacts artifacts
+cargo run --release -p phonopaper-train -- eval --dataset dataset --artifacts artifacts --split train
 ```
 
-prints presence accuracy / precision / recall on the validation split, the
-mean corner error in pixels over true positives and the fraction of corners
-within 3 px and 6 px.
+prints, for the validation split (default) or the training split, presence
+accuracy / precision / recall, the mean corner error in pixels over true
+positives and the fraction of corners within 3 px and 6 px.  Comparing the
+two splits tells **under-fitting** (both poor → train longer / stronger
+signal) from **over-fitting** (train good, valid poor → more data).
 
 ```bash
 cargo run --release -p phonopaper-train -- infer --artifacts artifacts photo1.jpg photo2.png
@@ -316,8 +337,9 @@ pub fn load() -> Detector<NdArray> {
 1. convert to grayscale and resize (stretch) to `input_size × input_size`
    (same as `phonopaper_train::infer::prepare_image`);
 2. call `detect`;
-3. if `probability ≥ 0.5`, `detection.corners_in_pixels(W, H)` gives the four
-   corners `TL, TR, BR, BL` in frame coordinates, in pattern orientation.
+3. if `probability ≥ 0.5`, `detection.canonical().corners_in_pixels(W, H)`
+   gives the four corners in frame coordinates, clockwise, with the marker
+   bands along `c0→c1` and `c2→c3` (see *Orientation ambiguity* above).
 
 ### 4.4 Use the corners
 
