@@ -1,8 +1,5 @@
 [workspace]
-members = ["phonopaper-rs", "phonopaper-cli", "phonopaper-android"]
-# The machine-learning tooling lives in its own workspace so that the heavy
-# `burn` dependency tree does not affect the library's lock file or build times.
-exclude = ["phonopaper-ml"]
+members = ["phonopaper-dataset", "phonopaper-train"]
 resolver = "3"
 
 [workspace.package]
@@ -11,6 +8,15 @@ edition = "2024"
 authors = ["Samuel Tardieu <sam@rfc1149.net>"]
 license = "Apache-2.0 OR MIT"
 repository = "https://git.sr.ht/~rfc1149/phonopaper-rs"
+publish = false
 
 [workspace.lints.clippy]
 pedantic = "warn"
+
+# Training on the CPU is much faster with optimisations; keep debug assertions
+# so that bugs in the data pipeline surface early.
+[profile.dev]
+opt-level = 3
+
+[profile.release]
+debug = 1

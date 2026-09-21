@@ -1,0 +1,39 @@
+[package]
+name = "phonopaper-train"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Train a PhonoPaper pattern detector neural network with burn."
+
+[lints]
+workspace = true
+
+[features]
+default = ["flex"]
+# Pure-Rust CPU backend (works everywhere, no GPU required).
+flex = ["burn/flex"]
+# Legacy pure-Rust CPU backend (slow; kept for reference).
+ndarray = ["burn/ndarray"]
+# GPU backend through wgpu (Vulkan / Metal / DX12).
+wgpu = ["burn/wgpu", "burn/fusion"]
+# NVIDIA GPU backend.
+cuda = ["burn/cuda", "burn/fusion"]
+# Interactive terminal dashboard during training.
+tui = ["burn/tui"]
+
+[dependencies]
+burn = { version = "0.21", default-features = false, features = ["std", "train", "autodiff"] }
+# Label / manifest formats shared with the generator.
+phonopaper-dataset = { path = "../phonopaper-dataset" }
+# Dataset loading (PNG only)
+image = { version = "0.25", default-features = false, features = ["png"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# Unit tests always run on the small CPU backend.
+burn = { version = "0.21", default-features = false, features = ["std", "ndarray"] }
