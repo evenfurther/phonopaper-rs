@@ -261,6 +261,7 @@ decoding both ways and keeping the one that sounds right).
 ```bash
 cargo run --release -p phonopaper-train -- eval --dataset dataset --artifacts artifacts
 cargo run --release -p phonopaper-train -- eval --dataset dataset --artifacts artifacts --split train
+cargo run --release -p phonopaper-train -- eval --dataset dataset --artifacts artifacts --epoch 12
 ```
 
 prints, for the validation split (default) or the training split, presence
@@ -268,13 +269,17 @@ accuracy / precision / recall, the mean corner error in pixels over true
 positives and the fraction of corners within 3 px and 6 px.  Comparing the
 two splits tells **under-fitting** (both poor → train longer / stronger
 signal) from **over-fitting** (train good, valid poor → more data).
+`--epoch N` evaluates the checkpoint of epoch `N` (it must still exist in
+`artifacts/checkpoint/`) instead of the exported `model.bin`, so epochs can
+be compared without re-exporting.
 
 ```bash
 cargo run --release -p phonopaper-train -- infer --artifacts artifacts photo1.jpg photo2.png
 ```
 
 prints one JSON object per image with `probability`, `present` (threshold
-`--threshold`, default 0.5) and `corners` in **original image pixels**.  The
+`--threshold`, default 0.5) and `corners` in **original image pixels**.
+`--epoch N` uses a checkpoint instead of `model.bin`, as for `eval`.  The
 image is converted to grayscale and stretched (aspect ratio not preserved) to
 the network input size; the normalised corners are mapped back by multiplying
 with the original width and height.
