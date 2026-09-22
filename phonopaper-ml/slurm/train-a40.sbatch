@@ -18,7 +18,8 @@
 #   2. generates the dataset if $DATASET does not exist yet (CPU-bound);
 #   3. trains with early stopping — the best-validation epoch is exported
 #      to $ARTIFACTS/model.bin automatically;
-#   4. evaluates that model on the validation and training splits.
+#   4. evaluates that best epoch (by checkpoint number) on the validation
+#      and training splits.
 #
 # Logs go to <jobname>-<jobid>.out / .err in the directory you submit from.
 
@@ -105,10 +106,22 @@ for d in "$ARTIFACTS"/valid/epoch-*; do
     awk -F, '{s+=$1;n++} END {printf "%.4f\n", s/n}' "$d/Loss.log"
 done | sort -t- -k2 -n
 
-# ─── 4. Evaluate the exported (best) model on both splits ────────────────────
+# Epoch with the lowest mean validation loss.  `train` has already exported
+# it to $ARTIFACTS/model.bin; we evaluate the checkpoint itself by number so
+# the log states unambiguously which epoch the figures refer to.
+BEST_EPOCH=$(
+    for d in "$ARTIFACTS"/valid/epoch-*; do
+        awk -F, -v e="${d##*epoch-}" '{s+=$1;n++} END {printf "%f %s\n", s/n, e}' "$d/Loss.log"
+    done | sort -n | head -1 | cut -d' ' -f2
+)
+echo "== best epoch: $BEST_EPOCH (exported to $ARTIFACTS/model.bin)"
 
-echo "== evaluation, $(date)"
-"${TRAIN[@]}" eval --dataset "$DATASET" --artifacts "$ARTIFACTS" --batch-size "$BATCH_SIZE"
-"${TRAIN[@]}" eval --dataset "$DATASET" --artifacts "$ARTIFACTS" --batch-size "$BATCH_SIZE" --split train
+# ─── 4. Evaluate the best epoch on both splits ───────────────────────────────
+
+echo "== evaluation of epoch $BEST_EPOCH, $(date)"
+"${TRAIN[@]}" eval --dataset "$DATASET" --artifacts "$ARTIFACTS" --batch-size "$BATCH_SIZE" \
+    --epoch "$BEST_EPOCH"
+"${TRAIN[@]}" eval --dataset "$DATASET" --artifacts "$ARTIFACTS" --batch-size "$BATCH_SIZE" \
+    --epoch "$BEST_EPOCH" --split train
 
 echo "== done, $(date); model: $ML/$ARTIFACTS/model.bin"
