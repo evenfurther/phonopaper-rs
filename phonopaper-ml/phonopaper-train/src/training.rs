@@ -387,25 +387,7 @@ pub fn export_checkpoint(artifact_dir: &Path, epoch: Option<usize>) -> Result<()
         Some(e) => e,
         None => best_epoch(artifact_dir)?,
     };
-    let config_path = artifact_dir.join(MODEL_CONFIG_FILE);
-    let model_config = DetectorConfig::load(&config_path)
-        .map_err(|e| format!("{}: {e}", config_path.display()))?;
-    let ckpt = checkpoint_path(artifact_dir, epoch);
-    if !ckpt.with_extension("mpk").is_file() {
-        return Err(format!(
-            "checkpoint {} does not exist (available: {})",
-            ckpt.with_extension("mpk").display(),
-            available_checkpoints(artifact_dir).join(", ")
-        ));
-    }
-    let model = model_config
-        .init::<Cpu>(&device)
-        .load_file(
-            &ckpt,
-            &NamedMpkFileRecorder::<FullPrecisionSettings>::new(),
-            &device,
-        )
-        .map_err(|e| format!("{}: {e}", ckpt.display()))?;
+    let model = load_model::<Cpu>(artifact_dir, Some(epoch), &device)?;
     model
         .clone()
         .save_file(
@@ -443,36 +425,78 @@ pub fn available_checkpoints(artifact_dir: &Path) -> Vec<String> {
     names
 }
 
-/// Load a trained detector from an artifact directory (`model.json` +
-/// `model.bin`).
+/// Load a detector from an artifact directory.
+///
+/// With `epoch = None`, the exported `model.bin` is used; with
+/// `Some(epoch)`, the training checkpoint `checkpoint/model-<epoch>.mpk` is
+/// loaded directly, which allows comparing epochs without re-exporting.
 ///
 /// # Errors
 ///
-/// Returns a message when either file is missing or invalid.
+/// Returns a message when `model.json` or the requested weights are missing
+/// or invalid.
+pub fn load_model<B: Backend>(
+    artifact_dir: &Path,
+    epoch: Option<usize>,
+    device: &B::Device,
+) -> Result<Detector<B>, String> {
+    let config_path = artifact_dir.join(MODEL_CONFIG_FILE);
+    if !config_path.is_file() {
+        return Err(format!("{} not found", config_path.display()));
+    }
+    let model_config = DetectorConfig::load(&config_path)
+        .map_err(|e| format!("{}: {e}", config_path.display()))?;
+    let model = model_config.init::<B>(device);
+
+    match epoch {
+        None => {
+            let weights_path = artifact_dir.join(EXPORT_FILE);
+            if !weights_path.is_file() {
+                return Err(format!(
+                    "{} not found; run `train` to completion, `export [--epoch N]` to convert a \
+                     checkpoint from {}, or pass `--epoch N` to use a checkpoint directly",
+                    weights_path.display(),
+                    artifact_dir.join("checkpoint").display()
+                ));
+            }
+            model
+                .load_file(
+                    &weights_path,
+                    &BinFileRecorder::<FullPrecisionSettings>::new(),
+                    device,
+                )
+                .map_err(|e| format!("{}: {e}", weights_path.display()))
+        }
+        Some(epoch) => {
+            let ckpt = checkpoint_path(artifact_dir, epoch);
+            if !ckpt.with_extension("mpk").is_file() {
+                return Err(format!(
+                    "checkpoint {} does not exist (available: {})",
+                    ckpt.with_extension("mpk").display(),
+                    available_checkpoints(artifact_dir).join(", ")
+                ));
+            }
+            model
+                .load_file(
+                    &ckpt,
+                    &NamedMpkFileRecorder::<FullPrecisionSettings>::new(),
+                    device,
+                )
+                .map_err(|e| format!("{}: {e}", ckpt.display()))
+        }
+    }
+}
+
+/// Load the exported detector (`model.json` + `model.bin`).
+///
+/// Shorthand for [`load_model`] with `epoch = None`.
+///
+/// # Errors
+///
+/// See [`load_model`].
 pub fn load_trained<B: Backend>(
     artifact_dir: &Path,
     device: &B::Device,
 ) -> Result<Detector<B>, String> {
-    let config_path = artifact_dir.join(MODEL_CONFIG_FILE);
-    let weights_path = artifact_dir.join(EXPORT_FILE);
-    for path in [&config_path, &weights_path] {
-        if !path.is_file() {
-            return Err(format!(
-                "{} not found; run `train` to completion, or `export [--epoch N]` to convert a \
-                 checkpoint from {}",
-                path.display(),
-                artifact_dir.join("checkpoint").display()
-            ));
-        }
-    }
-    let model_config = DetectorConfig::load(&config_path)
-        .map_err(|e| format!("{}: {e}", config_path.display()))?;
-    model_config
-        .init::<B>(device)
-        .load_file(
-            &weights_path,
-            &BinFileRecorder::<FullPrecisionSettings>::new(),
-            device,
-        )
-        .map_err(|e| format!("{}: {e}", weights_path.display()))
+    load_model(artifact_dir, None, device)
 }

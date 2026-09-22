@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use phonopaper_train::data::Split;
 use phonopaper_train::model::DetectorConfig;
 use phonopaper_train::training::{
-    TrainingConfig, export_checkpoint, load_trained, train, validation_losses,
+    TrainingConfig, export_checkpoint, load_model, train, validation_losses,
 };
 use phonopaper_train::{eval, infer};
 
@@ -122,6 +122,10 @@ enum Command {
         /// both tells under-fitting apart from over-fitting.
         #[arg(long, default_value = "valid")]
         split: String,
+        /// Evaluate the checkpoint of this epoch instead of the exported
+        /// `model.bin`.
+        #[arg(long)]
+        epoch: Option<usize>,
     },
     /// Run a trained detector on image files and print JSON results.
     Infer {
@@ -131,6 +135,10 @@ enum Command {
         /// Presence probability threshold.
         #[arg(long, default_value_t = 0.5)]
         threshold: f32,
+        /// Use the checkpoint of this epoch instead of the exported
+        /// `model.bin`.
+        #[arg(long)]
+        epoch: Option<usize>,
         /// Image files (any format supported by the `image` crate build).
         #[arg(required = true)]
         images: Vec<PathBuf>,
@@ -175,14 +183,19 @@ fn run(cli: Cli) -> Result<(), String> {
             artifacts,
             batch_size,
             split,
+            epoch,
         } => {
             let split = match split.as_str() {
                 "valid" => Split::Valid,
                 "train" => Split::Train,
                 other => return Err(format!("--split must be `valid` or `train`, got {other:?}")),
             };
-            let model = load_trained::<backend::Inference>(&artifacts, &device)?;
+            let model = load_model::<backend::Inference>(&artifacts, epoch, &device)?;
             let metrics = eval::evaluate(&model, &dataset, split, batch_size, &device)?;
+            match epoch {
+                Some(e) => println!("weights: checkpoint of epoch {e}"),
+                None => println!("weights: exported model.bin"),
+            }
             println!("split: {split:?}");
             println!("{metrics}");
             Ok(())
@@ -190,9 +203,10 @@ fn run(cli: Cli) -> Result<(), String> {
         Command::Infer {
             artifacts,
             threshold,
+            epoch,
             images,
         } => {
-            let model = load_trained::<backend::Inference>(&artifacts, &device)?;
+            let model = load_model::<backend::Inference>(&artifacts, epoch, &device)?;
             for path in &images {
                 let det = infer::infer_file(&model, path, threshold, &device)?;
                 let json = serde_json::to_string(&det).map_err(|e| e.to_string())?;
