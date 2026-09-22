@@ -12,7 +12,9 @@
 #       sbatch phonopaper-ml/slurm/train-a40.sbatch
 #
 # The job:
-#   1. builds phonopaper-train (CUDA backend, no TUI) if needed;
+#   1. builds phonopaper-train (CUDA backend, no TUI) for the CPU of the node
+#      it lands on — the workspace compiles with `target-cpu=native`, so each
+#      CPU model gets its own target directory (target/cpu-<model>/);
 #   2. generates the dataset if $DATASET does not exist yet (CPU-bound);
 #   3. trains with early stopping — the best-validation epoch is exported
 #      to $ARTIFACTS/model.bin automatically;
@@ -61,23 +63,37 @@ echo "== job $SLURM_JOB_ID on $(hostname), $(date)"
 echo "== dataset=$DATASET artifacts=$ARTIFACTS epochs=$EPOCHS batch=$BATCH_SIZE lr=$LEARNING_RATE patience=$PATIENCE workers=$WORKERS"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv || true
 
-# ─── 1. Build ────────────────────────────────────────────────────────────────
+# ─── 1. Build for this node's CPU ────────────────────────────────────────────
+#
+# The repository builds with `-C target-cpu=native` (see .cargo/config.toml).
+# Cargo does not include the host CPU in its freshness check, so a binary
+# built on the login node or on another node type would be reused as-is and
+# could crash with an illegal instruction here.  Use one target directory per
+# CPU model: the build is redone the first time a new node type is seen and
+# cached for later jobs on the same hardware.
 
+CPU_MODEL=$(grep -m1 'model name' /proc/cpuinfo | sed 's/.*: //; s/[^A-Za-z0-9]\+/-/g; s/-*$//')
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ML/target/cpu-${CPU_MODEL:-unknown}}"
+echo "== cpu: ${CPU_MODEL:-unknown}; target dir: $CARGO_TARGET_DIR"
+
+DATASET_BIN=(cargo run -q --release -p phonopaper-dataset --)
+TRAIN=(cargo run -q --release -p phonopaper-train --no-default-features --features cuda --)
+
+# Compile up front so the timings below are about training only.
 cargo build --release -p phonopaper-dataset
 cargo build --release -p phonopaper-train --no-default-features --features cuda
-TRAIN=./target/release/phonopaper-train
 
 # ─── 2. Dataset (generated only if missing) ──────────────────────────────────
 
 if [ ! -f "$DATASET/manifest.json" ]; then
     echo "== generating $DATASET ($DATASET_COUNT images)"
-    ./target/release/phonopaper-dataset --output "$DATASET" --count "$DATASET_COUNT"
+    "${DATASET_BIN[@]}" --output "$DATASET" --count "$DATASET_COUNT"
 fi
 
 # ─── 3. Train (exports the best-validation epoch to $ARTIFACTS/model.bin) ────
 
 echo "== training, $(date)"
-"$TRAIN" train \
+"${TRAIN[@]}" train \
     --dataset "$DATASET" --artifacts "$ARTIFACTS" \
     --epochs "$EPOCHS" --batch-size "$BATCH_SIZE" --learning-rate "$LEARNING_RATE" \
     --patience "$PATIENCE" --workers "$WORKERS" --seed "$SEED" \
@@ -92,7 +108,7 @@ done | sort -t- -k2 -n
 # ─── 4. Evaluate the exported (best) model on both splits ────────────────────
 
 echo "== evaluation, $(date)"
-"$TRAIN" eval --dataset "$DATASET" --artifacts "$ARTIFACTS" --batch-size "$BATCH_SIZE"
-"$TRAIN" eval --dataset "$DATASET" --artifacts "$ARTIFACTS" --batch-size "$BATCH_SIZE" --split train
+"${TRAIN[@]}" eval --dataset "$DATASET" --artifacts "$ARTIFACTS" --batch-size "$BATCH_SIZE"
+"${TRAIN[@]}" eval --dataset "$DATASET" --artifacts "$ARTIFACTS" --batch-size "$BATCH_SIZE" --split train
 
 echo "== done, $(date); model: $ML/$ARTIFACTS/model.bin"
