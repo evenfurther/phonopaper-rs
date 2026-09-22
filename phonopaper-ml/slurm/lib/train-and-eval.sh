@@ -92,6 +92,19 @@ fi
 # ─── 3. Train (exports the best-validation epoch to $ARTIFACTS/model.bin) ────
 
 echo "== training, $(date)"
+# Log the trainer's resident memory every 5 minutes so memory growth is
+# visible in the job output (the job was once OOM-killed by CUDA pinned
+# host-memory pools; see phonopaper-train/src/data.rs).
+(
+    while sleep 300; do
+        pid=$(pgrep -n -f 'phonopaper-train train' || true)
+        [ -n "$pid" ] && [ -r "/proc/$pid/status" ] \
+            && awk -v t="$(date +%T)" '/VmRSS/{printf "== %s trainer RSS: %.1f GB\n", t, $2/1048576}' "/proc/$pid/status"
+    done
+) &
+MONITOR=$!
+trap 'kill "$MONITOR" 2>/dev/null || true' EXIT
+
 "${TRAIN[@]}" train \
     --dataset "$DATASET" --artifacts "$ARTIFACTS" \
     --epochs "$EPOCHS" --batch-size "$BATCH_SIZE" --learning-rate "$LEARNING_RATE" \

@@ -2,7 +2,6 @@
 
 use std::path::Path;
 
-use burn::data::dataloader::batcher::Batcher;
 use burn::data::dataset::Dataset;
 use burn::prelude::*;
 
@@ -81,7 +80,11 @@ pub fn evaluate<B: Backend>(
     let (mut corners_total, mut within3, mut within6) = (0usize, 0usize, 0usize);
 
     for chunk in items.chunks(batch_size.max(1)) {
-        let output = model.forward(DetectionBatcher.batch(chunk.to_vec(), device).images);
+        let output = model.forward(
+            DetectionBatcher::assemble(chunk)
+                .to_device::<B>(device)
+                .images,
+        );
         for (det, item) in decode_output(&output).iter().zip(chunk) {
             let predicted = det.probability >= 0.5;
             let truth = item.present();

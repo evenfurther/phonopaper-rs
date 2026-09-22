@@ -18,7 +18,9 @@ use burn::train::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::data::{DetectionBatch, DetectionBatcher, Split, count_positives, load_split};
+use crate::data::{
+    DetectionBatch, DetectionBatcher, HostBatch, Split, count_positives, load_split,
+};
 use crate::model::{Detector, DetectorConfig};
 
 /// File name of the training checkpoint (`MessagePack`, full precision).
@@ -138,24 +140,32 @@ impl<B: Backend> Detector<B> {
             targets: batch.targets,
         }
     }
+
+    /// Device the model's parameters live on.
+    fn device(&self) -> B::Device {
+        self.devices()
+            .into_iter()
+            .next()
+            .unwrap_or_else(B::Device::default)
+    }
 }
 
 impl<B: AutodiffBackend> TrainStep for Detector<B> {
-    type Input = DetectionBatch<B>;
+    type Input = HostBatch;
     type Output = RegressionOutput<B>;
 
-    fn step(&self, batch: DetectionBatch<B>) -> TrainOutput<RegressionOutput<B>> {
-        let item = self.forward_regression(batch);
+    fn step(&self, batch: HostBatch) -> TrainOutput<RegressionOutput<B>> {
+        let item = self.forward_regression(batch.to_device(&self.device()));
         TrainOutput::new(self, item.loss.backward(), item)
     }
 }
 
 impl<B: Backend> InferenceStep for Detector<B> {
-    type Input = DetectionBatch<B>;
+    type Input = HostBatch;
     type Output = RegressionOutput<B>;
 
-    fn step(&self, batch: DetectionBatch<B>) -> RegressionOutput<B> {
-        self.forward_regression(batch)
+    fn step(&self, batch: HostBatch) -> RegressionOutput<B> {
+        self.forward_regression(batch.to_device(&self.device()))
     }
 }
 
