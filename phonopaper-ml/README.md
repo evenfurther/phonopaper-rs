@@ -256,24 +256,31 @@ decoding both ways and keeping the one that sounds right).
 
 ### Batch job on a Slurm cluster
 
-`slurm/train-a40.sbatch` does steps 1–3 unattended on one GPU (partition
-`A40` by default): build, generate the dataset if missing, train with early
-stopping, export the best epoch and evaluate it on both splits.
+`slurm/train-a40.sbatch` and `slurm/train-rtx6000pro.sbatch` do steps 1–3
+unattended on one GPU: build, generate the dataset if missing, train with
+early stopping, export the best epoch and evaluate it on both splits.  They
+only differ in resource directives and default batch size / learning rate /
+worker count; the shared job body is `slurm/lib/train-and-eval.sh`.
 
 ```bash
 cd phonopaper-ml
-sbatch slurm/train-a40.sbatch
+sbatch slurm/train-a40.sbatch                 # A40, CUDA:          batch 256, lr 2e-3,  8 workers
+sbatch slurm/train-rtx6000pro.sbatch          # RTX 6000 Pro, wgpu: batch 512, lr 3e-3, 16 workers
 # tunables are environment variables:
 DATASET=dataset-200k EPOCHS=60 BATCH_SIZE=512 LEARNING_RATE=3e-3 sbatch slurm/train-a40.sbatch
-# other partition / GPU:
+# other partition / GPU with the A40 defaults:
 sbatch --partition=V100-32GB slurm/train-a40.sbatch
 ```
 
 Variables: `REPO`, `DATASET`, `DATASET_COUNT`, `ARTIFACTS` (default
 `artifacts-<jobid>`), `EPOCHS`, `BATCH_SIZE`, `LEARNING_RATE`, `PATIENCE`,
-`WORKERS`, `SEED`, `CUDA_MODULE`, `CARGO_TARGET_DIR`.  Output lands in
-`phonopaper-train-<jobid>.out` in the submission directory; the trained
-model is `<ARTIFACTS>/model.bin`.
+`WORKERS`, `SEED`, `BACKEND` (`cuda` or `wgpu`), `CUDA_MODULE`,
+`CARGO_TARGET_DIR`.  Output lands in `phonopaper-train-<jobid>.out` in the
+submission directory; the trained model is `<ARTIFACTS>/model.bin`.
+
+> The RTX 6000 Pro script uses the Vulkan `wgpu` backend, which needs only
+> the graphics driver.  With `BACKEND=cuda` on that (Blackwell) GPU the CUDA
+> module must provide `libnvrtc` ≥ 12.8 (`CUDA_MODULE=cuda/12.8 …`).
 
 > The workspace compiles with `-C target-cpu=native` and Cargo does not
 > notice when a cached binary was built on a different CPU.  The script
