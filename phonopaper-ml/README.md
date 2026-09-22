@@ -261,15 +261,17 @@ decoding both ways and keeping the one that sounds right).
 
 ### Batch job on a Slurm cluster
 
-`slurm/train-a40.sbatch` and `slurm/train-rtx6000pro.sbatch` do steps 1–3
-unattended on one GPU: build, generate the dataset if missing, train with
-early stopping, export the best epoch and evaluate it on both splits.  They
-only differ in resource directives and default batch size / learning rate /
-worker count; the shared job body is `slurm/lib/train-and-eval.sh`.
+`slurm/train-a40.sbatch`, `slurm/train-h100.sbatch` and
+`slurm/train-rtx6000pro.sbatch` do steps 1–3 unattended on one GPU: build,
+generate the dataset if missing, train with early stopping, export the best
+epoch and evaluate it on both splits.  They only differ in resource
+directives and default backend / batch size / learning rate / worker count;
+the shared job body is `slurm/lib/train-and-eval.sh`.
 
 ```bash
 cd phonopaper-ml
 sbatch slurm/train-a40.sbatch                 # A40, CUDA:          batch 256, lr 2e-3,  8 workers
+sbatch slurm/train-h100.sbatch                # H100, CUDA:         batch 512, lr 3e-3, 16 workers
 sbatch slurm/train-rtx6000pro.sbatch          # RTX 6000 Pro, wgpu: batch 512, lr 3e-3, 16 workers
 # tunables are environment variables:
 DATASET=dataset-200k EPOCHS=60 BATCH_SIZE=512 LEARNING_RATE=3e-3 sbatch slurm/train-a40.sbatch
