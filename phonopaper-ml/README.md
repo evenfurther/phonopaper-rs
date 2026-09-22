@@ -271,9 +271,15 @@ sbatch --partition=V100-32GB slurm/train-a40.sbatch
 
 Variables: `REPO`, `DATASET`, `DATASET_COUNT`, `ARTIFACTS` (default
 `artifacts-<jobid>`), `EPOCHS`, `BATCH_SIZE`, `LEARNING_RATE`, `PATIENCE`,
-`WORKERS`, `SEED`, `CUDA_MODULE`.  Output lands in
+`WORKERS`, `SEED`, `CUDA_MODULE`, `CARGO_TARGET_DIR`.  Output lands in
 `phonopaper-train-<jobid>.out` in the submission directory; the trained
 model is `<ARTIFACTS>/model.bin`.
+
+> The workspace compiles with `-C target-cpu=native` and Cargo does not
+> notice when a cached binary was built on a different CPU.  The script
+> therefore builds into `target/cpu-<cpu model>/` on the node itself; do not
+> point `CARGO_TARGET_DIR` at a directory shared with builds from other
+> machines.
 
 ---
 
