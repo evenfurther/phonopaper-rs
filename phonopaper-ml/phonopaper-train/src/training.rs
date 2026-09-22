@@ -9,9 +9,7 @@ use burn::prelude::*;
 use burn::record::{BinFileRecorder, FullPrecisionSettings, NamedMpkFileRecorder};
 use burn::tensor::activation::log_sigmoid;
 use burn::tensor::backend::AutodiffBackend;
-use burn::train::checkpoint::{
-    ComposedCheckpointingStrategy, KeepLastNCheckpoints, MetricCheckpointingStrategy,
-};
+use burn::train::checkpoint::KeepLastNCheckpoints;
 use burn::train::metric::LossMetric;
 use burn::train::metric::store::{Aggregate, Direction, Split as MetricSplit};
 use burn::train::{
@@ -223,18 +221,12 @@ pub fn train<B: AutodiffBackend>(
         .metric_train_numeric(LossMetric::new())
         .metric_valid_numeric(LossMetric::new())
         .with_file_checkpointer(NamedMpkFileRecorder::<FullPrecisionSettings>::new())
-        // Keep the two most recent checkpoints plus the best-validation one.
-        .with_checkpointing_strategy(
-            ComposedCheckpointingStrategy::builder()
-                .add(KeepLastNCheckpoints::new(2))
-                .add(MetricCheckpointingStrategy::new(
-                    &LossMetric::<B>::new(),
-                    Aggregate::Mean,
-                    Direction::Lowest,
-                    MetricSplit::Valid,
-                ))
-                .build(),
-        )
+        // Keep every checkpoint while training runs: burn's metric-based
+        // strategy only saves an epoch that is already the best when the
+        // checkpoint decision is made and can never rescue it later, which
+        // lost the best epoch in practice.  The best epoch is exported from
+        // the metric logs below and the rest is pruned afterwards.
+        .with_checkpointing_strategy(KeepLastNCheckpoints::new(config.num_epochs.max(1)))
         .early_stopping(MetricEarlyStoppingStrategy::new(
             &LossMetric::<B>::new(),
             Aggregate::Mean,
@@ -259,7 +251,56 @@ pub fn train<B: AutodiffBackend>(
 
     let best = best_epoch(artifact_dir)?;
     println!("best validation loss at epoch {best}; exporting it");
-    export_checkpoint(artifact_dir, Some(best))
+    export_checkpoint(artifact_dir, Some(best))?;
+
+    // Free disk space: keep the best and the most recent checkpoint only.
+    let last = validation_losses(artifact_dir)?
+        .last()
+        .map_or(best, |&(epoch, _)| epoch);
+    let removed = prune_checkpoints(artifact_dir, &[best, last])?;
+    if removed > 0 {
+        if best == last {
+            println!("pruned {removed} checkpoint files (kept epoch {best})");
+        } else {
+            println!("pruned {removed} checkpoint files (kept epochs {best} and {last})");
+        }
+    }
+    Ok(())
+}
+
+/// Delete checkpoint files of every epoch not listed in `keep`.
+///
+/// Returns the number of files removed.
+///
+/// # Errors
+///
+/// Returns a message when a file cannot be removed.
+pub fn prune_checkpoints(artifact_dir: &Path, keep: &[usize]) -> Result<usize, String> {
+    let dir = artifact_dir.join("checkpoint");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(0);
+    };
+    let mut removed = 0;
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        // Files are named `<kind>-<epoch>.mpk` (model, optim, scheduler…).
+        let Some(epoch) = name
+            .strip_suffix(".mpk")
+            .and_then(|stem| stem.rsplit_once('-'))
+            .and_then(|(_, epoch)| epoch.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        if !keep.contains(&epoch) {
+            std::fs::remove_file(entry.path())
+                .map_err(|e| format!("{}: {e}", entry.path().display()))?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 /// Mean validation loss per epoch, read from burn's metric logs
@@ -331,8 +372,8 @@ pub fn checkpoint_path(artifact_dir: &Path, epoch: usize) -> std::path::PathBuf 
 /// Convert a training checkpoint into `model.bin`, entirely on the CPU.
 ///
 /// `epoch` defaults to the epoch with the best validation loss.  The
-/// checkpoint must still exist in `<artifacts>/checkpoint/` (training keeps
-/// the best one and the two most recent).
+/// checkpoint must still exist in `<artifacts>/checkpoint/` (all epochs are
+/// kept while training runs; afterwards only the best and the last remain).
 ///
 /// # Errors
 ///

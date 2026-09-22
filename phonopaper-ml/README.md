@@ -155,11 +155,15 @@ cargo run --release -p phonopaper-train --no-default-features --features wgpu --
 Images whose index is a multiple of 10 form the **validation split**; the
 rest is the training split.
 
-Training keeps the two most recent checkpoints **and the one with the best
-validation loss** in `artifacts/checkpoint/`.  When training ends (after
-`--epochs` or by early stopping), the best-validation epoch is exported to
-`model.bin` — the export runs on the CPU, independently of the training
-backend.
+Training keeps **every** epoch's checkpoint in `artifacts/checkpoint/`
+(≈ 4 MB each with optimiser state) while it runs.  When it ends (after
+`--epochs` or by early stopping), the epoch with the lowest mean validation
+loss is exported to `model.bin` — on the CPU, independently of the training
+backend — and the checkpoints are pruned to that epoch and the last one.
+
+> burn's metric-based checkpointing strategy is deliberately not used: it
+> only saves an epoch that is already the best when the checkpoint decision
+> is taken and cannot rescue it later, which lost the best epoch in practice.
 
 ### Recovering a model from checkpoints
 
@@ -205,7 +209,7 @@ The artifact directory receives burn's logs and per-epoch checkpoints plus:
 | `training.json` | All training hyper-parameters |
 | `model.mpk` | Full-precision copy of the exported epoch (`NamedMpkFileRecorder`) |
 | `model.bin` | **Weights to embed** (`BinFileRecorder`, full precision, ≈ 1.1 MB) |
-| `checkpoint/` | Per-epoch checkpoints (best validation epoch + two most recent) |
+| `checkpoint/` | Per-epoch checkpoints (all during training; best + last afterwards) |
 
 ### The network
 
