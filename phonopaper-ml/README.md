@@ -254,6 +254,27 @@ edges carry the marker bands (`c0→c1` and `c2→c3`); which of them is the
 high-frequency end must come from elsewhere (the phone's orientation, or
 decoding both ways and keeping the one that sounds right).
 
+### Batch job on a Slurm cluster
+
+`slurm/train-a40.sbatch` does steps 1–3 unattended on one GPU (partition
+`A40` by default): build, generate the dataset if missing, train with early
+stopping, export the best epoch and evaluate it on both splits.
+
+```bash
+cd phonopaper-ml
+sbatch slurm/train-a40.sbatch
+# tunables are environment variables:
+DATASET=dataset-200k EPOCHS=60 BATCH_SIZE=512 LEARNING_RATE=3e-3 sbatch slurm/train-a40.sbatch
+# other partition / GPU:
+sbatch --partition=V100-32GB slurm/train-a40.sbatch
+```
+
+Variables: `REPO`, `DATASET`, `DATASET_COUNT`, `ARTIFACTS` (default
+`artifacts-<jobid>`), `EPOCHS`, `BATCH_SIZE`, `LEARNING_RATE`, `PATIENCE`,
+`WORKERS`, `SEED`, `CUDA_MODULE`.  Output lands in
+`phonopaper-train-<jobid>.out` in the submission directory; the trained
+model is `<ARTIFACTS>/model.bin`.
+
 ---
 
 ## 3. Evaluate and try the model
