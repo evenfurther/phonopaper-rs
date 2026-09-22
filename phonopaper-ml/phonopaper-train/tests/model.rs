@@ -3,7 +3,7 @@
 use burn::backend::NdArray;
 use burn::backend::ndarray::NdArrayDevice;
 use burn::prelude::*;
-use phonopaper_train::model::{Detection, DetectorConfig, OUTPUT_SIZE, decode_output};
+use phonopaper_train::model::{Detection, DetectorConfig, OUTPUT_SIZE, decode_output, soft_argmax};
 use phonopaper_train::training::detection_loss;
 
 type B = NdArray;
@@ -134,6 +134,33 @@ fn loss_is_invariant_under_a_half_turn_of_the_sheet() {
         l_quarter > 0.1,
         "quarter turn must be penalised: {l_quarter}"
     );
+}
+
+#[test]
+fn soft_argmax_recovers_a_peaked_cell() {
+    let device = NdArrayDevice::Cpu;
+    // 4 corners × 4×4 grid; put a very sharp peak for corner 0 at (col 3,
+    // row 0), for corner 1 at (col 0, row 3), flat elsewhere.
+    let mut data = vec![0.0_f32; 4 * 16];
+    data[3] = 100.0; // corner 0, row 0, col 3
+    data[16 + 12] = 100.0; // corner 1, row 3, col 0
+    let heat = Tensor::<B, 4>::from_floats(TensorData::new(data, [1, 4, 4, 4]), &device);
+    let coords: Vec<f32> = soft_argmax(heat).into_data().to_vec().unwrap();
+    // Grid spans [-0.1, 1.1]; cell centres at -0.1 + 1.2 * (i + 0.5) / 4.
+    let centre = |i: f32| -0.1 + 1.2 * (i + 0.5) / 4.0;
+    assert!((coords[0] - centre(3.0)).abs() < 1e-3, "x0 = {}", coords[0]);
+    assert!((coords[1] - centre(0.0)).abs() < 1e-3, "y0 = {}", coords[1]);
+    assert!((coords[2] - centre(0.0)).abs() < 1e-3, "x1 = {}", coords[2]);
+    assert!((coords[3] - centre(3.0)).abs() < 1e-3, "y1 = {}", coords[3]);
+    // A flat heat-map yields the grid centre.
+    assert!((coords[4] - 0.5).abs() < 1e-5 && (coords[5] - 0.5).abs() < 1e-5);
+}
+
+#[test]
+fn heatmap_size_is_stride_8() {
+    let device = NdArrayDevice::Cpu;
+    let model = DetectorConfig::new().init::<B>(&device);
+    assert_eq!(model.heatmap_size(), 16);
 }
 
 #[test]

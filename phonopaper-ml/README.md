@@ -201,21 +201,33 @@ The artifact directory receives burn's logs and per-epoch checkpoints plus:
 
 | File | Content |
 |---|---|
-| `model.json` | `DetectorConfig` (input size, hidden width, dropout) |
+| `model.json` | `DetectorConfig` (input size, corner-head width) |
 | `training.json` | All training hyper-parameters |
 | `model.mpk` | Full-precision copy of the exported epoch (`NamedMpkFileRecorder`) |
-| `model.bin` | **Weights to embed** (`BinFileRecorder`, full precision, ≈ 2 MB) |
+| `model.bin` | **Weights to embed** (`BinFileRecorder`, full precision, ≈ 1.1 MB) |
 | `checkpoint/` | Per-epoch checkpoints (best validation epoch + two most recent) |
 
 ### The network
 
-`phonopaper-train/src/model.rs` — a VGG-style CNN of ≈ 500 k parameters:
+`phonopaper-train/src/model.rs` — a small CNN of ≈ 280 k parameters with two
+heads:
 
 ```text
-input  [1 × 128 × 128]  (grayscale, values in [0, 1])
-5 × ( conv 3×3 → BatchNorm → ReLU → maxpool 2 )   channels 16, 32, 64, 128, 128
-flatten (2048) → Linear 128 → ReLU → Dropout 0.2 → Linear 9
+input     [1 × 128 × 128]  (grayscale, values in [0, 1])
+trunk     5 × ( conv 3×3 → BatchNorm → ReLU → maxpool 2 )   channels 16, 32, 64, 128, 128
+presence  global average pool of the last stage (128) → Linear → 1 logit
+corners   from stage 3 (64 × 16 × 16, stride 8):
+          conv 3×3 → BatchNorm → ReLU → conv 1×1 → 4 heat-maps (16 × 16) → soft-argmax
 ```
+
+Corners are localised with **heat-maps + soft-argmax** rather than a fully
+connected regression: the coordinate of each corner is the softmax-weighted
+mean of the heat-map cell centres, which keeps the spatial information of
+the feature map and is continuous (sub-cell precision).  A fully connected
+head was tried first and plateaued at ≈ 13 px mean error on 128 px inputs,
+identically on the training and validation splits — a capacity limit, not
+over-fitting.  The soft-argmax grid spans `[-0.1, 1.1]` so corners slightly
+outside the frame remain representable.
 
 Output row layout: `[presence logit, x0, y0, x1, y1, x2, y2, x3, y3]` with
 corners normalised by the input side (`0` = left/top edge, `1` = right/bottom
@@ -301,7 +313,7 @@ recorders match weights by field name.
 
 ### 4.3 Embed the weights
 
-Copy `artifacts/model.bin` to `phonopaper-rs/src/decode/nn/model.bin` (≈ 2 MB)
+Copy `artifacts/model.bin` to `phonopaper-rs/src/decode/nn/model.bin` (≈ 1.1 MB)
 and `artifacts/model.json` to `phonopaper-rs/src/decode/nn/model.json`, then:
 
 ```rust
