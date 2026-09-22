@@ -6,13 +6,22 @@
 //!
 //! # Architecture
 //!
-//! A small VGG-style convolutional network for a single-channel square input
-//! of side `input_size` (default 128):
+//! A small convolutional network for a single-channel square input of side
+//! `input_size` (default 128), with two heads:
 //!
 //! ```text
-//! [conv3×3 → BatchNorm → ReLU → maxpool2] × 5   (channels 16, 32, 64, 128, 128)
-//! flatten → Linear(2048 → 128) → ReLU → Dropout → Linear(128 → 9)
+//! trunk:    [conv3×3 → BatchNorm → ReLU → maxpool2] × 5   (channels 16, 32, 64, 128, 128)
+//! presence: global average pool of the last stage → Linear(128 → 1)
+//! corners:  from stage 3 (stride 8, 16×16 for a 128 px input):
+//!           conv3×3 → BatchNorm → ReLU → conv1×1 → 4 heat-maps → soft-argmax
 //! ```
+//!
+//! Corners are **not** regressed by a fully connected layer: that discards
+//! spatial precision and plateaus around 10 % of the frame.  Instead each
+//! corner gets a heat-map over the stride-8 grid and its coordinate is the
+//! soft-argmax (softmax-weighted mean of the cell centres), which is
+//! continuous and localises to a fraction of a cell.  The grid spans
+//! `[-0.1, 1.1]` so corners slightly outside the frame stay representable.
 //!
 //! # Output
 //!
@@ -29,17 +38,24 @@
 
 use burn::nn::conv::{Conv2d, Conv2dConfig};
 use burn::nn::pool::{MaxPool2d, MaxPool2dConfig};
-use burn::nn::{
-    BatchNorm, BatchNormConfig, Dropout, DropoutConfig, Linear, LinearConfig, PaddingConfig2d, Relu,
-};
+use burn::nn::{BatchNorm, BatchNormConfig, Linear, LinearConfig, PaddingConfig2d, Relu};
 use burn::prelude::*;
-use burn::tensor::activation::sigmoid;
+use burn::tensor::activation::{sigmoid, softmax};
 
 /// Number of output values: one presence logit plus eight coordinates.
 pub const OUTPUT_SIZE: usize = 9;
 
 /// Channel width of each convolutional stage.
 const STAGE_CHANNELS: [usize; 5] = [16, 32, 64, 128, 128];
+
+/// Index of the trunk stage (0-based) whose output feeds the corner head.
+/// Stage 2 has undergone three 2× poolings: stride 8.
+const CORNER_STAGE: usize = 2;
+
+/// Extent of the soft-argmax coordinate grid, in normalised units.  Slightly
+/// larger than the frame so that corners up to 10 % outside can be predicted.
+const GRID_MIN: f32 = -0.1;
+const GRID_MAX: f32 = 1.1;
 
 /// Hyper-parameters of the [`Detector`].
 #[derive(Config, Debug)]
@@ -48,12 +64,9 @@ pub struct DetectorConfig {
     /// 32 (five 2× pooling stages).
     #[config(default = 128)]
     pub input_size: usize,
-    /// Width of the hidden fully connected layer.
-    #[config(default = 128)]
+    /// Channel width of the corner head's hidden convolution.
+    #[config(default = 64)]
     pub hidden: usize,
-    /// Dropout probability applied before the output layer.
-    #[config(default = 0.2)]
-    pub dropout: f64,
 }
 
 /// One `conv → BatchNorm → ReLU → maxpool` stage.
@@ -90,10 +103,11 @@ impl<B: Backend> ConvBlock<B> {
 #[derive(Module, Debug)]
 pub struct Detector<B: Backend> {
     blocks: Vec<ConvBlock<B>>,
-    fc1: Linear<B>,
-    fc2: Linear<B>,
+    presence: Linear<B>,
+    corner_conv: Conv2d<B>,
+    corner_norm: BatchNorm<B>,
+    corner_out: Conv2d<B>,
     activation: Relu,
-    dropout: Dropout,
     input_size: usize,
 }
 
@@ -115,14 +129,16 @@ impl DetectorConfig {
             blocks.push(ConvBlock::new(in_channels, out_channels, device));
             in_channels = out_channels;
         }
-        let spatial = self.input_size >> STAGE_CHANNELS.len();
-        let flat = in_channels * spatial * spatial;
         Detector {
             blocks,
-            fc1: LinearConfig::new(flat, self.hidden).init(device),
-            fc2: LinearConfig::new(self.hidden, OUTPUT_SIZE).init(device),
+            presence: LinearConfig::new(in_channels, 1).init(device),
+            corner_conv: Conv2dConfig::new([STAGE_CHANNELS[CORNER_STAGE], self.hidden], [3, 3])
+                .with_padding(PaddingConfig2d::Same)
+                .with_bias(false)
+                .init(device),
+            corner_norm: BatchNormConfig::new(self.hidden).init(device),
+            corner_out: Conv2dConfig::new([self.hidden, 4], [1, 1]).init(device),
             activation: Relu::new(),
-            dropout: DropoutConfig::new(self.dropout).init(),
             input_size: self.input_size,
         }
     }
@@ -135,20 +151,44 @@ impl<B: Backend> Detector<B> {
         self.input_size
     }
 
+    /// Side of the corner heat-maps (`input_size / 8`).
+    #[must_use]
+    pub fn heatmap_size(&self) -> usize {
+        self.input_size >> (CORNER_STAGE + 1)
+    }
+
     /// Run the network.
     ///
     /// `images` has shape `[batch, 1, input_size, input_size]` with values in
     /// `[0, 1]`.  Returns `[batch, 9]` (see the module documentation).
     pub fn forward(&self, images: Tensor<B, 4>) -> Tensor<B, 2> {
+        let (early, late) = self.blocks.split_at(CORNER_STAGE + 1);
         let mut x = images;
-        for block in &self.blocks {
+        for block in early {
             x = block.forward(x);
         }
-        let x = x.flatten(1, 3);
-        let x = self.fc1.forward(x);
+        let corner_features = x.clone();
+        for block in late {
+            x = block.forward(x);
+        }
+        // Presence: global average pool → logit.
+        let pooled = x.mean_dim(3).mean_dim(2).flatten::<2>(1, 3);
+        let logit = self.presence.forward(pooled);
+
+        // Corners: heat-maps → soft-argmax.
+        let coords = soft_argmax(self.heatmaps(corner_features));
+        Tensor::cat(vec![logit, coords], 1)
+    }
+
+    /// Raw corner heat-maps, `[batch, 4, h, h]` with `h = heatmap_size()`.
+    ///
+    /// Useful for visualisation and debugging; [`Detector::forward`] applies
+    /// the soft-argmax for you.
+    pub fn heatmaps(&self, stage_features: Tensor<B, 4>) -> Tensor<B, 4> {
+        let x = self.corner_conv.forward(stage_features);
+        let x = self.corner_norm.forward(x);
         let x = self.activation.forward(x);
-        let x = self.dropout.forward(x);
-        self.fc2.forward(x)
+        self.corner_out.forward(x)
     }
 
     /// Run the network on a single grayscale image and decode the result.
@@ -172,6 +212,40 @@ impl<B: Backend> Detector<B> {
 pub fn image_tensor<B: Backend>(pixels: &[u8], size: usize, device: &B::Device) -> Tensor<B, 3> {
     let floats: Vec<f32> = pixels.iter().map(|&p| f32::from(p) / 255.0).collect();
     Tensor::<B, 1>::from_floats(floats.as_slice(), device).reshape([1, size, size])
+}
+
+/// Soft-argmax of `[batch, 4, h, w]` heat-maps → `[batch, 8]` coordinates
+/// `x0 y0 … x3 y3` in normalised units.
+///
+/// Each heat-map is soft-maxed over its `h·w` cells and the coordinate is the
+/// probability-weighted mean of the cell centres, laid out on a grid spanning
+/// `[GRID_MIN, GRID_MAX]` in both directions.
+pub fn soft_argmax<B: Backend>(heatmaps: Tensor<B, 4>) -> Tensor<B, 2> {
+    let [batch, corners, h, w] = heatmaps.dims();
+    let device = heatmaps.device();
+    let flat = heatmaps.reshape([batch, corners, h * w]);
+    let weights = softmax(flat, 2);
+
+    let centre = |i: usize, n: usize| {
+        #[expect(clippy::cast_precision_loss, reason = "grid sizes are tiny integers")]
+        let t = (i as f32 + 0.5) / n as f32;
+        GRID_MIN + (GRID_MAX - GRID_MIN) * t
+    };
+    let mut xs = Vec::with_capacity(h * w);
+    let mut ys = Vec::with_capacity(h * w);
+    for row in 0..h {
+        for col in 0..w {
+            xs.push(centre(col, w));
+            ys.push(centre(row, h));
+        }
+    }
+    let grid_x = Tensor::<B, 1>::from_floats(xs.as_slice(), &device).reshape([1, 1, h * w]);
+    let grid_y = Tensor::<B, 1>::from_floats(ys.as_slice(), &device).reshape([1, 1, h * w]);
+
+    let x = (weights.clone() * grid_x).sum_dim(2); // [batch, 4, 1]
+    let y = (weights * grid_y).sum_dim(2); // [batch, 4, 1]
+    // Interleave as x0 y0 x1 y1 …
+    Tensor::cat(vec![x, y], 2).reshape([batch, corners * 2])
 }
 
 /// A decoded detector output for one image.
