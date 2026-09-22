@@ -17,8 +17,10 @@ default = ["flex"]
 flex = ["burn/flex"]
 # Legacy pure-Rust CPU backend (slow; kept for reference).
 ndarray = ["burn/ndarray"]
-# GPU backend through wgpu (Vulkan / Metal / DX12).
-wgpu = ["burn/wgpu", "burn/fusion"]
+# GPU backend through wgpu (Vulkan / Metal / DX12).  Like `cuda`, without
+# `fusion`: burn 0.21's fusion layer has crashed with "Should have handle for
+# tensor …" (burn-ir) on an RTX 6000 Pro mid-training.
+wgpu = ["burn/wgpu"]
 # NVIDIA GPU backend.  `fusion` is deliberately left out: with burn 0.21 the
 # fused CUDA read-back kernel can be generated with an invalid 16-wide vector
 # ("Invalid vector size. Got 16 which should not be >8") and crash the run.
