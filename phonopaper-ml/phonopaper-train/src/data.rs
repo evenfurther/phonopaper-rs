@@ -7,7 +7,7 @@ use burn::data::dataset::{Dataset, InMemDataset};
 use burn::prelude::*;
 use phonopaper_dataset::labels::{read_labels, read_manifest};
 
-use crate::model::{OUTPUT_SIZE, image_tensor};
+use crate::model::OUTPUT_SIZE;
 
 /// One image with its ground truth, fully loaded in memory.
 #[derive(Debug, Clone)]
@@ -116,17 +116,23 @@ pub struct DetectionBatcher;
 
 impl<B: Backend> Batcher<B, Item, DetectionBatch<B>> for DetectionBatcher {
     fn batch(&self, items: Vec<Item>, device: &B::Device) -> DetectionBatch<B> {
-        let images: Vec<Tensor<B, 3>> = items
-            .iter()
-            .map(|item| image_tensor::<B>(&item.pixels, item.size, device))
-            .collect();
-        let targets: Vec<Tensor<B, 2>> = items
-            .iter()
-            .map(|item| Tensor::<B, 1>::from_floats(item.target, device).unsqueeze::<2>())
-            .collect();
+        // Assemble both tensors on the CPU and upload each exactly once:
+        // per-image uploads followed by an on-device `stack` were the
+        // bottleneck of the input pipeline.
+        let batch = items.len();
+        let size = items.first().map_or(0, |item| item.size);
+        let mut pixels = Vec::with_capacity(batch * size * size);
+        let mut targets = Vec::with_capacity(batch * OUTPUT_SIZE);
+        for item in &items {
+            debug_assert_eq!(item.size, size, "all images in a batch share one size");
+            pixels.extend(item.pixels.iter().map(|&p| f32::from(p) / 255.0));
+            targets.extend_from_slice(&item.target);
+        }
         DetectionBatch {
-            images: Tensor::stack(images, 0),
-            targets: Tensor::cat(targets, 0),
+            images: Tensor::<B, 1>::from_floats(pixels.as_slice(), device)
+                .reshape([batch, 1, size, size]),
+            targets: Tensor::<B, 1>::from_floats(targets.as_slice(), device)
+                .reshape([batch, OUTPUT_SIZE]),
         }
     }
 }
