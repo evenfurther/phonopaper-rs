@@ -101,6 +101,39 @@ pub fn load_split(dir: &Path, split: Split) -> Result<(InMemDataset<Item>, usize
     Ok((InMemDataset::new(items), size))
 }
 
+/// A mini-batch assembled on the host, ready to be uploaded.
+///
+/// The data-loader workers only produce this plain struct; the upload to the
+/// training device happens in the training/inference step, on the caller's
+/// thread.  Creating device tensors inside worker threads made the CUDA
+/// backend allocate one pinned host-memory pool per worker thread *per epoch*
+/// (streams are per thread and workers are respawned every epoch), which
+/// grew without bound until the job was OOM-killed.
+#[derive(Debug, Clone)]
+pub struct HostBatch {
+    /// Number of images.
+    pub batch: usize,
+    /// Image side in pixels.
+    pub size: usize,
+    /// `batch × size × size` pixels in `[0, 1]`, row-major, image-major.
+    pub pixels: Vec<f32>,
+    /// `batch × OUTPUT_SIZE` targets.
+    pub targets: Vec<f32>,
+}
+
+impl HostBatch {
+    /// Upload to `device` as a [`DetectionBatch`].
+    #[must_use]
+    pub fn to_device<B: Backend>(&self, device: &B::Device) -> DetectionBatch<B> {
+        DetectionBatch {
+            images: Tensor::<B, 1>::from_floats(self.pixels.as_slice(), device)
+                .reshape([self.batch, 1, self.size, self.size]),
+            targets: Tensor::<B, 1>::from_floats(self.targets.as_slice(), device)
+                .reshape([self.batch, OUTPUT_SIZE]),
+        }
+    }
+}
+
 /// A mini-batch on device `B`.
 #[derive(Debug, Clone)]
 pub struct DetectionBatch<B: Backend> {
@@ -110,30 +143,35 @@ pub struct DetectionBatch<B: Backend> {
     pub targets: Tensor<B, 2>,
 }
 
-/// Turns [`Item`]s into a [`DetectionBatch`].
+/// Turns [`Item`]s into a [`HostBatch`].
 #[derive(Debug, Clone, Default)]
 pub struct DetectionBatcher;
 
-impl<B: Backend> Batcher<B, Item, DetectionBatch<B>> for DetectionBatcher {
-    fn batch(&self, items: Vec<Item>, device: &B::Device) -> DetectionBatch<B> {
-        // Assemble both tensors on the CPU and upload each exactly once:
-        // per-image uploads followed by an on-device `stack` were the
-        // bottleneck of the input pipeline.
+impl DetectionBatcher {
+    /// Assemble a batch on the host.
+    #[must_use]
+    pub fn assemble(items: &[Item]) -> HostBatch {
         let batch = items.len();
         let size = items.first().map_or(0, |item| item.size);
         let mut pixels = Vec::with_capacity(batch * size * size);
         let mut targets = Vec::with_capacity(batch * OUTPUT_SIZE);
-        for item in &items {
+        for item in items {
             debug_assert_eq!(item.size, size, "all images in a batch share one size");
             pixels.extend(item.pixels.iter().map(|&p| f32::from(p) / 255.0));
             targets.extend_from_slice(&item.target);
         }
-        DetectionBatch {
-            images: Tensor::<B, 1>::from_floats(pixels.as_slice(), device)
-                .reshape([batch, 1, size, size]),
-            targets: Tensor::<B, 1>::from_floats(targets.as_slice(), device)
-                .reshape([batch, OUTPUT_SIZE]),
+        HostBatch {
+            batch,
+            size,
+            pixels,
+            targets,
         }
+    }
+}
+
+impl<B: Backend> Batcher<B, Item, HostBatch> for DetectionBatcher {
+    fn batch(&self, items: Vec<Item>, _device: &B::Device) -> HostBatch {
+        Self::assemble(&items)
     }
 }
 
