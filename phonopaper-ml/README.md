@@ -119,9 +119,14 @@ across all data columns — the white margins are not included.
 |---|---|---|
 | *(default)* `flex` | CPU | Pure Rust, works everywhere; ~3 s per batch of 32 |
 | `--no-default-features --features wgpu` | GPU via Vulkan/Metal/DX12 | Needs only the graphics driver; ~0.35 s per batch on an RTX A2000 at full clocks |
-| `--no-default-features --features cuda` | NVIDIA GPU | Needs the CUDA toolkit (`libnvrtc`) installed; `fusion` is intentionally off (see `Cargo.toml`) |
+| `--no-default-features --features cuda` | NVIDIA GPU | Needs the CUDA toolkit (`libnvrtc`) installed |
 | `--no-default-features --features ndarray` | CPU | Legacy backend, ~10× slower than `flex` |
 | add `--features tui` | — | Interactive terminal dashboard instead of plain logs |
+
+> Neither GPU feature enables burn's `fusion` layer: with burn 0.21 it has
+> produced an invalid CUDA kernel at export time and crashed mid-training on
+> wgpu (`Should have handle for tensor …`).  Plain kernels are somewhat
+> slower but reliable.
 
 > **NixOS / Vulkan:** the Vulkan loader must be reachable, e.g.
 > `export LD_LIBRARY_PATH=/run/opengl-driver/lib`.
