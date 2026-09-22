@@ -2,11 +2,12 @@
 
 use std::path::Path;
 
+use burn::data::dataloader::batcher::Batcher;
 use burn::data::dataset::Dataset;
 use burn::prelude::*;
 
-use crate::data::{Item, Split, load_split};
-use crate::model::{Detector, decode_output, image_tensor};
+use crate::data::{DetectionBatcher, Item, Split, load_split};
+use crate::model::{Detector, decode_output};
 
 /// Aggregate metrics over a split.
 #[derive(Debug, Clone, PartialEq)]
@@ -80,11 +81,7 @@ pub fn evaluate<B: Backend>(
     let (mut corners_total, mut within3, mut within6) = (0usize, 0usize, 0usize);
 
     for chunk in items.chunks(batch_size.max(1)) {
-        let tensors: Vec<Tensor<B, 3>> = chunk
-            .iter()
-            .map(|item| image_tensor::<B>(&item.pixels, item.size, device))
-            .collect();
-        let output = model.forward(Tensor::stack(tensors, 0));
+        let output = model.forward(DetectionBatcher.batch(chunk.to_vec(), device).images);
         for (det, item) in decode_output(&output).iter().zip(chunk) {
             let predicted = det.probability >= 0.5;
             let truth = item.present();
