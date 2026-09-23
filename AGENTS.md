@@ -16,8 +16,10 @@ phonopaper-rs/           ← repo root (workspace)
 │       ├── ci.yml       ← fmt, clippy, test, Android APK, IAI benchmarks
 │       └── coverage.yml ← cargo-llvm-cov, posts diff comment on PRs
 ├── phonopaper-rs/       ← library crate (published to crates.io)
-│   ├── Cargo.toml
+│   ├── Cargo.toml       ← optional `nn-detector` feature (burn, inference only)
 │   ├── src/
+│   │   └── decode/nn/   ← neural-network detector: model.rs (copied from
+│   │                       phonopaper-ml), embedded model.bin + model.json
 │   ├── tests/           ← integration tests + fixtures
 │   ├── benches/         ← Criterion and IAI-Callgrind benchmarks
 │   └── examples/        ← developer / research examples
@@ -111,6 +113,29 @@ cargo llvm-cov -p phonopaper-rs --tests --ignore-filename-regex='(benches|exampl
 ```
 
 Run them in this order. Fix any issues before considering the task done.
+
+The `nn-detector` feature of `phonopaper-rs` is **off by default** so that the
+`burn` dependency tree does not affect the default library build, coverage or
+benchmarks.  `phonopaper-android` enables it (the Android app detects the sheet
+with the network), so `cargo clippy --workspace` and `cargo test --workspace`
+already compile the library with the feature through feature unification; the
+library's own feature-gated tests still need an explicit flag.  When a task
+touches `phonopaper-rs/src/decode/nn/`, `phonopaper-rs/tests/nn.rs` or the
+feature wiring, also run:
+
+```bash
+cargo clippy -p phonopaper-rs --all-targets --features nn-detector
+cargo test -p phonopaper-rs --features nn-detector
+```
+
+`phonopaper-rs/src/decode/nn/model.rs` is a verbatim copy of
+`phonopaper-ml/phonopaper-train/src/model.rs`; burn matches weights by field
+name, so the two files must stay identical and `model.bin` / `model.json`
+must be re-exported from `phonopaper-ml` whenever the architecture changes.
+`phonopaper-ml/phonopaper-train/tests/embedded.rs` enforces both (file
+identity, and that the embedded weights load with exactly the parameter
+shapes of `model.json`); run `cargo test -p phonopaper-train --test embedded`
+from `phonopaper-ml/` after touching any of these files.
 
 When a task changes `phonopaper-android/` or `android-app/`, also run:
 
@@ -240,6 +265,12 @@ the documented baselines stay in sync with the repository.
 A change is acceptable if **every file stays at or above its baseline** for all
 three metrics (regions, functions, lines).  New public functions added without
 accompanying tests will lower the numbers and must be caught before merging.
+
+The canonical command builds with default features, so `decode/nn/*.rs` (the
+`nn-detector` feature) does not appear in the table.  Its tests live in
+`tests/nn.rs`; when changing that module, check its coverage separately with
+`cargo llvm-cov -p phonopaper-rs --tests --features nn-detector
+--ignore-filename-regex='(benches|examples)' --summary-only`.
 
 **Known permanently-uncovered lines** (do not attempt to cover these):
 
