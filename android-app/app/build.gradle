@@ -92,5 +92,5 @@ dependencies {
     implementation 'androidx.camera:camera-core:1.6.2'
     implementation 'androidx.camera:camera-lifecycle:1.6.2'
     implementation 'androidx.camera:camera-view:1.6.2'
-    implementation 'androidx.core:core-ktx:1.19.0'
+    implementation 'androidx.core:core-ktx:1.19.1'
 }
