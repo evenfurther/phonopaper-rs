@@ -12,16 +12,18 @@
 //! ```text
 //! trunk:    [conv3×3 → BatchNorm → ReLU → maxpool2] × 5   (channels 16, 32, 64, 128, 128)
 //! presence: global average pool of the last stage → Linear(128 → 1)
-//! corners:  from stage 3 (stride 8, 16×16 for a 128 px input):
-//!           conv3×3 → BatchNorm → ReLU → conv1×1 → 4 heat-maps → soft-argmax
+//! corners:  stage 2 (stride 4, 32×32×32) ⊕ stage 3 (stride 8) upsampled ×2
+//!           → conv3×3 → BatchNorm → ReLU → conv1×1 → 4 heat-maps (32×32) → soft-argmax
 //! ```
 //!
 //! Corners are **not** regressed by a fully connected layer: that discards
 //! spatial precision and plateaus around 10 % of the frame.  Instead each
-//! corner gets a heat-map over the stride-8 grid and its coordinate is the
+//! corner gets a heat-map over a stride-4 grid and its coordinate is the
 //! soft-argmax (softmax-weighted mean of the cell centres), which is
-//! continuous and localises to a fraction of a cell.  The grid spans
-//! `[-0.1, 1.1]` so corners slightly outside the frame stay representable.
+//! continuous and localises to a fraction of a cell.  The heat-map input
+//! merges a fine stage (stride 4, sharp edges) with a coarser one (stride 8,
+//! larger receptive field), U-Net style.  The grid spans `[-0.1, 1.1]` so
+//! corners slightly outside the frame stay representable.
 //!
 //! # Output
 //!
@@ -41,6 +43,8 @@ use burn::nn::pool::{MaxPool2d, MaxPool2dConfig};
 use burn::nn::{BatchNorm, BatchNormConfig, Linear, LinearConfig, PaddingConfig2d, Relu};
 use burn::prelude::*;
 use burn::tensor::activation::{sigmoid, softmax};
+use burn::tensor::module::interpolate;
+use burn::tensor::ops::{InterpolateMode, InterpolateOptions};
 
 /// Number of output values: one presence logit plus eight coordinates.
 pub const OUTPUT_SIZE: usize = 9;
@@ -48,9 +52,14 @@ pub const OUTPUT_SIZE: usize = 9;
 /// Channel width of each convolutional stage.
 const STAGE_CHANNELS: [usize; 5] = [16, 32, 64, 128, 128];
 
-/// Index of the trunk stage (0-based) whose output feeds the corner head.
-/// Stage 2 has undergone three 2× poolings: stride 8.
-const CORNER_STAGE: usize = 2;
+/// Trunk stages (0-based) feeding the corner head: the fine one sets the
+/// heat-map resolution (stage 1 → stride 4), the coarse one is upsampled ×2
+/// and concatenated (stage 2 → stride 8).
+const FINE_STAGE: usize = 1;
+const COARSE_STAGE: usize = 2;
+
+/// Stride of the heat-map grid relative to the input.
+const HEATMAP_STRIDE: usize = 1 << (FINE_STAGE + 1);
 
 /// Extent of the soft-argmax coordinate grid, in normalised units.  Slightly
 /// larger than the frame so that corners up to 10 % outside can be predicted.
@@ -132,10 +141,16 @@ impl DetectorConfig {
         Detector {
             blocks,
             presence: LinearConfig::new(in_channels, 1).init(device),
-            corner_conv: Conv2dConfig::new([STAGE_CHANNELS[CORNER_STAGE], self.hidden], [3, 3])
-                .with_padding(PaddingConfig2d::Same)
-                .with_bias(false)
-                .init(device),
+            corner_conv: Conv2dConfig::new(
+                [
+                    STAGE_CHANNELS[FINE_STAGE] + STAGE_CHANNELS[COARSE_STAGE],
+                    self.hidden,
+                ],
+                [3, 3],
+            )
+            .with_padding(PaddingConfig2d::Same)
+            .with_bias(false)
+            .init(device),
             corner_norm: BatchNormConfig::new(self.hidden).init(device),
             corner_out: Conv2dConfig::new([self.hidden, 4], [1, 1]).init(device),
             activation: Relu::new(),
@@ -151,10 +166,10 @@ impl<B: Backend> Detector<B> {
         self.input_size
     }
 
-    /// Side of the corner heat-maps (`input_size / 8`).
+    /// Side of the corner heat-maps (`input_size / 4`).
     #[must_use]
     pub fn heatmap_size(&self) -> usize {
-        self.input_size >> (CORNER_STAGE + 1)
+        self.input_size / HEATMAP_STRIDE
     }
 
     /// Run the network.
@@ -162,30 +177,45 @@ impl<B: Backend> Detector<B> {
     /// `images` has shape `[batch, 1, input_size, input_size]` with values in
     /// `[0, 1]`.  Returns `[batch, 9]` (see the module documentation).
     pub fn forward(&self, images: Tensor<B, 4>) -> Tensor<B, 2> {
-        let (early, late) = self.blocks.split_at(CORNER_STAGE + 1);
         let mut x = images;
-        for block in early {
+        let mut fine = None;
+        let mut coarse = None;
+        for (i, block) in self.blocks.iter().enumerate() {
             x = block.forward(x);
-        }
-        let corner_features = x.clone();
-        for block in late {
-            x = block.forward(x);
+            if i == FINE_STAGE {
+                fine = Some(x.clone());
+            } else if i == COARSE_STAGE {
+                coarse = Some(x.clone());
+            }
         }
         // Presence: global average pool → logit.
         let pooled = x.mean_dim(3).mean_dim(2).flatten::<2>(1, 3);
         let logit = self.presence.forward(pooled);
 
-        // Corners: heat-maps → soft-argmax.
-        let coords = soft_argmax(self.heatmaps(corner_features));
+        // Corners: heat-maps → soft-argmax.  Both stages always exist because
+        // the trunk has more than COARSE_STAGE + 1 blocks.
+        let coords = match (fine, coarse) {
+            (Some(fine), Some(coarse)) => soft_argmax(self.heatmaps(fine, coarse)),
+            _ => unreachable!("trunk has {} stages", STAGE_CHANNELS.len()),
+        };
         Tensor::cat(vec![logit, coords], 1)
     }
 
-    /// Raw corner heat-maps, `[batch, 4, h, h]` with `h = heatmap_size()`.
+    /// Raw corner heat-maps, `[batch, 4, h, h]` with `h = heatmap_size()`,
+    /// from the fine (`[batch, 32, h, h]`) and coarse (`[batch, 64, h/2, h/2]`)
+    /// trunk features.
     ///
     /// Useful for visualisation and debugging; [`Detector::forward`] applies
     /// the soft-argmax for you.
-    pub fn heatmaps(&self, stage_features: Tensor<B, 4>) -> Tensor<B, 4> {
-        let x = self.corner_conv.forward(stage_features);
+    pub fn heatmaps(&self, fine: Tensor<B, 4>, coarse: Tensor<B, 4>) -> Tensor<B, 4> {
+        let [_, _, h, w] = fine.dims();
+        let upsampled = interpolate(
+            coarse,
+            [h, w],
+            InterpolateOptions::new(InterpolateMode::Nearest),
+        );
+        let x = Tensor::cat(vec![fine, upsampled], 1);
+        let x = self.corner_conv.forward(x);
         let x = self.corner_norm.forward(x);
         let x = self.activation.forward(x);
         self.corner_out.forward(x)

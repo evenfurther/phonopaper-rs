@@ -88,7 +88,7 @@ fn corner_errors_on_negatives_do_not_count_but_positives_do() {
         Tensor::<B, 2>::from_floats([[20.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]], &device);
     let l_good: f32 = detection_loss(good, targets.clone()).into_scalar();
     let l_bad: f32 = detection_loss(bad, targets).into_scalar();
-    assert!(l_bad > l_good + 0.1, "good = {l_good}, bad = {l_bad}");
+    assert!(l_bad > l_good + 0.02, "good = {l_good}, bad = {l_bad}");
 
     let neg_targets = Tensor::<B, 2>::from_floats([[0.0; 9]], &device);
     let neg_a =
@@ -131,7 +131,7 @@ fn loss_is_invariant_under_a_half_turn_of_the_sheet() {
     let l_quarter: f32 =
         detection_loss(out2, Tensor::<B, 2>::from_floats([quarter], &device)).into_scalar();
     assert!(
-        l_quarter > 0.1,
+        l_quarter > 0.02,
         "quarter turn must be penalised: {l_quarter}"
     );
 }
@@ -157,10 +157,10 @@ fn soft_argmax_recovers_a_peaked_cell() {
 }
 
 #[test]
-fn heatmap_size_is_stride_8() {
+fn heatmap_size_is_stride_4() {
     let device = NdArrayDevice::Cpu;
     let model = DetectorConfig::new().init::<B>(&device);
-    assert_eq!(model.heatmap_size(), 16);
+    assert_eq!(model.heatmap_size(), 32);
 }
 
 #[test]

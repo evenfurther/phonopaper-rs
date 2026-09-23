@@ -156,6 +156,7 @@ cargo run --release -p phonopaper-train --no-default-features --features wgpu --
 | `--workers <N>` | `4` | Data-loader threads |
 | `--input-size <PX>` | `128` | Network input side; must equal the dataset `--size` |
 | `--patience <N>` | `8` | Stop early when the validation loss has not improved for N epochs |
+| `--min-lr-fraction <F>` | `0.05` | Final learning rate of the cosine decay, as a fraction of `--learning-rate` |
 
 Images whose index is a multiple of 10 form the **validation split**; the
 rest is the training split.
@@ -225,25 +226,35 @@ heads:
 input     [1 × 128 × 128]  (grayscale, values in [0, 1])
 trunk     5 × ( conv 3×3 → BatchNorm → ReLU → maxpool 2 )   channels 16, 32, 64, 128, 128
 presence  global average pool of the last stage (128) → Linear → 1 logit
-corners   from stage 3 (64 × 16 × 16, stride 8):
-          conv 3×3 → BatchNorm → ReLU → conv 1×1 → 4 heat-maps (16 × 16) → soft-argmax
+corners   stage 2 (32 × 32 × 32, stride 4) ⊕ stage 3 (64 × 16 × 16) upsampled ×2
+          → conv 3×3 → BatchNorm → ReLU → conv 1×1 → 4 heat-maps (32 × 32) → soft-argmax
 ```
 
 Corners are localised with **heat-maps + soft-argmax** rather than a fully
 connected regression: the coordinate of each corner is the softmax-weighted
 mean of the heat-map cell centres, which keeps the spatial information of
-the feature map and is continuous (sub-cell precision).  A fully connected
-head was tried first and plateaued at ≈ 13 px mean error on 128 px inputs,
-identically on the training and validation splits — a capacity limit, not
-over-fitting.  The soft-argmax grid spans `[-0.1, 1.1]` so corners slightly
-outside the frame remain representable.
+the feature map and is continuous (sub-cell precision).  The heat-map input
+merges a fine stage (stride 4, sharp edges) with a coarser one (stride 8,
+context), U-Net style.  A fully connected head was tried first and plateaued
+at ≈ 13 px mean error on 128 px inputs, identically on the training and
+validation splits — a capacity limit, not over-fitting; stride-8 heat-maps
+brought that to 6.4 px.  The soft-argmax grid spans `[-0.1, 1.1]` so corners
+slightly outside the frame remain representable.
 
 Output row layout: `[presence logit, x0, y0, x1, y1, x2, y2, x3, y3]` with
 corners normalised by the input side (`0` = left/top edge, `1` = right/bottom
 edge; values slightly outside `[0, 1]` are legitimate).
 
-Loss = binary cross-entropy on the presence logit + 20 × smooth-L1 (δ = 0.05)
-on the corners, the latter averaged over positive samples only.
+Loss = binary cross-entropy on the presence logit + 20 × smooth-L1 on the
+corners, the latter averaged over positive samples only.  The smooth-L1
+transition δ is **0.01** (≈ 1.3 px): below δ the loss turns quadratic and
+its gradient fades, so δ is effectively the precision the network stops
+caring about — with δ = 0.05 the mean error plateaued at exactly 6.4 px.
+
+The learning rate follows a **cosine decay** from `--learning-rate` to
+`--learning-rate × --min-lr-fraction` (default 0.05) over `--epochs`; the
+plateau of a constant rate showed up as the best epoch sitting in the
+middle of the run with no further progress.
 
 #### Orientation ambiguity
 
@@ -307,7 +318,10 @@ cargo run --release -p phonopaper-train -- eval --dataset dataset --artifacts ar
 
 prints, for the validation split (default) or the training split, presence
 accuracy / precision / recall, the mean corner error in pixels over true
-positives and the fraction of corners within 3 px and 6 px.  Comparing the
+positives, the fraction of corners within 3 px and 6 px, and the same error
+**relative to the pattern's longest edge** (mean, and fractions within 2 %
+and 5 %) — a 6 px error means something different on a 30 px pattern than
+on a 120 px one.  Comparing the
 two splits tells **under-fitting** (both poor → train longer / stronger
 signal) from **over-fitting** (train good, valid poor → more data).
 `--epoch N` evaluates the checkpoint of epoch `N` (it must still exist in

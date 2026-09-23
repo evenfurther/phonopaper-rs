@@ -4,6 +4,7 @@ use std::path::Path;
 
 use burn::data::dataloader::DataLoaderBuilder;
 use burn::data::dataset::Dataset;
+use burn::lr_scheduler::cosine::CosineAnnealingLrSchedulerConfig;
 use burn::optim::AdamConfig;
 use burn::prelude::*;
 use burn::record::{BinFileRecorder, FullPrecisionSettings, NamedMpkFileRecorder};
@@ -39,8 +40,13 @@ pub const TRAIN_CONFIG_FILE: &str = "training.json";
 /// as much as the classification term.
 const CORNER_LOSS_WEIGHT: f64 = 20.0;
 
-/// Transition point of the smooth-L1 (Huber) corner loss, in normalised units.
-const HUBER_DELTA: f64 = 0.05;
+/// Transition point of the smooth-L1 (Huber) corner loss, in normalised units
+/// (`0.01` ≈ 1.3 px on a 128 px input).
+///
+/// Below δ the loss is quadratic and its gradient fades, so δ is effectively
+/// the precision the network stops caring about: with δ = 0.05 the mean
+/// corner error plateaued at exactly 6.4 px = 0.05 × 128.
+const HUBER_DELTA: f64 = 0.01;
 
 /// Training hyper-parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +68,10 @@ pub struct TrainingConfig {
     pub learning_rate: f64,
     /// Stop when the validation loss has not improved for this many epochs.
     pub patience: usize,
+    /// Final learning rate of the cosine schedule, as a fraction of
+    /// `learning_rate`.  The rate decays from `learning_rate` to
+    /// `learning_rate × min_lr_fraction` over the `num_epochs` epochs.
+    pub min_lr_fraction: f64,
 }
 
 impl Default for TrainingConfig {
@@ -75,6 +85,7 @@ impl Default for TrainingConfig {
             seed: 42,
             learning_rate: 1e-3,
             patience: 8,
+            min_lr_fraction: 0.05,
         }
     }
 }
@@ -216,6 +227,7 @@ pub fn train<B: AutodiffBackend>(
         valid_set.len(),
         count_positives(&valid_set)
     );
+    let train_len = train_set.len();
 
     let dataloader_train = DataLoaderBuilder::new(DetectionBatcher)
         .batch_size(config.batch_size)
@@ -250,14 +262,19 @@ pub fn train<B: AutodiffBackend>(
         .summary();
 
     let model = config.model.init::<B>(device);
+    // Cosine decay over the whole run (one scheduler step per iteration).
+    let iterations_per_epoch = train_len.div_ceil(config.batch_size.max(1));
+    let scheduler = CosineAnnealingLrSchedulerConfig::new(
+        config.learning_rate,
+        (config.num_epochs * iterations_per_epoch).max(1),
+    )
+    .with_min_lr(config.learning_rate * config.min_lr_fraction)
+    .init()
+    .map_err(|e| format!("learning-rate schedule: {e}"))?;
     // The trained model returned here lives on the training backend; we do
     // not read it back (GPU read-back has proven fragile).  The checkpoints
     // on disk are the source of truth for the export below.
-    let _ = training.launch(Learner::new(
-        model,
-        config.optimizer.init(),
-        config.learning_rate,
-    ));
+    let _ = training.launch(Learner::new(model, config.optimizer.init(), scheduler));
 
     let best = best_epoch(artifact_dir)?;
     println!("best validation loss at epoch {best}; exporting it");
