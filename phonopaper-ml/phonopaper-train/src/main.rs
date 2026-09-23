@@ -93,6 +93,10 @@ enum Command {
         /// many epochs.
         #[arg(long, default_value_t = 8)]
         patience: usize,
+        /// Final learning rate of the cosine decay, as a fraction of
+        /// `--learning-rate`.
+        #[arg(long, default_value_t = 0.05)]
+        min_lr_fraction: f64,
     },
     /// Convert a training checkpoint into `model.bin` (on the CPU).
     ///
@@ -159,6 +163,7 @@ fn run(cli: Cli) -> Result<(), String> {
             workers,
             input_size,
             patience,
+            min_lr_fraction,
         } => {
             let config = TrainingConfig {
                 model: DetectorConfig::new().with_input_size(input_size),
@@ -168,6 +173,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 seed,
                 num_workers: workers,
                 patience,
+                min_lr_fraction,
                 ..TrainingConfig::default()
             };
             train::<Training>(&dataset, &artifacts, &config, &device)
