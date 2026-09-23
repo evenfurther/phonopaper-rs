@@ -7,8 +7,8 @@
     <string name="capture_frame">Capture current frame for manual playback</string>
     <string name="camera_waiting">Waiting for the camera preview…</string>
     <string name="camera_ready">Camera ready. Point it at a `PhonoPaper` image.</string>
-    <string name="camera_searching">Searching the live preview for `PhonoPaper` markers…</string>
-    <string name="camera_detected">Detected a `PhonoPaper` strip in the live preview.</string>
+    <string name="camera_searching">Searching the live preview for a `PhonoPaper` sheet…</string>
+    <string name="camera_detected">Detected a `PhonoPaper` sheet in the live preview.</string>
     <string name="camera_playing">Playing a live camera decode…</string>
     <string name="camera_permission_denied">Camera access was denied. You can still open images from the library.</string>
     <string name="camera_unavailable">The camera preview could not be started on this device.</string>

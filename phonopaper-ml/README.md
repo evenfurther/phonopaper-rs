@@ -346,87 +346,87 @@ with the original width and height.
 
 ## 4. Transfer the model to `phonopaper-rs`
 
-The detector is meant to replace / complement the hand-written stripe
-detector (`phonopaper_rs::decode::detect_markers`) inside the library and,
-through `phonopaper-android`, in the Android app.  The steps are:
+The detector lives in the library as `phonopaper_rs::decode::nn`, behind the
+**`nn-detector`** Cargo feature (off by default so that burn never affects the
+default build).  It complements the hand-written stripe detector
+(`phonopaper_rs::decode::detect_markers`) and is what the Android app uses
+through `phonopaper-android`: the network locates the sheet in every preview
+frame (outline overlay, auto-play trigger) and, for decoding, the detected
+quadrilateral is rectified with a homography before the stripe detector reads
+it (`phonopaper_android::rectify_pattern`).  The pieces in the library are:
 
-### 4.1 Add burn (inference only) as an optional dependency
+| File in `phonopaper-rs/` | Content |
+|---|---|
+| `Cargo.toml` | `nn-detector = ["dep:burn"]`; `burn` with only `std` + `ndarray` (inference on the CPU, no `train` / `autodiff`) |
+| `src/decode/nn/model.rs` | **Verbatim copy** of `phonopaper-train/src/model.rs` |
+| `src/decode/nn/model.bin`, `model.json` | The exported weights and their `DetectorConfig`, embedded with `include_bytes!` |
+| `src/decode/nn/mod.rs` | `load()`, `prepare_image()` and the `PatternDetector` wrapper |
+| `tests/nn.rs` | Renders a pattern with `spectrogram_to_image`, warps it into a scene and checks that the detector finds its corners; negatives; ordering helpers |
 
-In `phonopaper-rs/Cargo.toml`:
+### 4.1 Refresh the embedded model
 
-```toml
-[features]
-# Neural-network corner detector (pulls in burn for inference).
-nn-detector = ["dep:burn"]
+After a new training run:
 
-[dependencies]
-burn = { version = "0.21", default-features = false, features = ["std", "ndarray"], optional = true }
+```bash
+cp artifacts/model.bin  ../phonopaper-rs/src/decode/nn/model.bin
+cp artifacts/model.json ../phonopaper-rs/src/decode/nn/model.json
+# only if the architecture changed:
+cp phonopaper-train/src/model.rs ../phonopaper-rs/src/decode/nn/model.rs
 ```
 
-Only the `ndarray` (or `flex`) CPU backend is needed for inference; neither
-`train` nor `autodiff` are required, which keeps the dependency tree small
-enough for the Android `cdylib`.
+burn's recorders match weights **by field name**, so `model.rs` must be
+identical in both crates and the weights must have been exported from that
+very definition, or `load()` panics at start-up.  Note that burn does *not*
+check tensor shapes when loading: weights exported with a different `hidden`
+or channel width load silently and only misbehave later.
+`phonopaper-train/tests/embedded.rs` guards against both mistakes — it
+compares the two `model.rs` byte for byte and checks that the embedded
+`model.bin` loads with exactly the parameter shapes of `model.json`:
 
-### 4.2 Copy the model definition
+```bash
+cargo test -p phonopaper-train --test embedded
+```
 
-Copy `phonopaper-ml/phonopaper-train/src/model.rs` to
-`phonopaper-rs/src/decode/nn/model.rs` unchanged.  It depends only on
-`burn::nn`, `burn::prelude` and `burn::tensor::activation`.  Make sure the
-struct field names and order stay identical to the training crate — burn's
-recorders match weights by field name.
+Then, from the repository root:
 
-### 4.3 Embed the weights
+```bash
+cargo clippy -p phonopaper-rs --all-targets --features nn-detector
+cargo test -p phonopaper-rs --features nn-detector
+```
 
-Copy `artifacts/model.bin` to `phonopaper-rs/src/decode/nn/model.bin` (≈ 1.1 MB)
-and `artifacts/model.json` to `phonopaper-rs/src/decode/nn/model.json`, then:
+`tests/nn.rs` places synthetic patterns at known positions and asserts on the
+presence probability and mean corner error; a weaker model shows up there.
+
+### 4.2 Use the detector
 
 ```rust
-//! phonopaper-rs/src/decode/nn/mod.rs
-mod model;
+use phonopaper_rs::decode::nn::PatternDetector;
 
-use burn::backend::NdArray;
-use burn::backend::ndarray::NdArrayDevice;
-use burn::module::Module;
-use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
-
-pub use model::{Detection, Detector, DetectorConfig};
-
-static WEIGHTS: &[u8] = include_bytes!("model.bin");
-const CONFIG: &str = include_str!("model.json");
-
-/// Load the embedded detector.
-pub fn load() -> Detector<NdArray> {
-    let device = NdArrayDevice::Cpu;
-    // `DetectorConfig` derives serde, so it can be read from the embedded
-    // JSON; if you trained with the defaults, `DetectorConfig::new()` works.
-    let config: DetectorConfig = serde_json::from_str(CONFIG).expect("valid model.json");
-    let record = BinBytesRecorder::<FullPrecisionSettings, &'static [u8]>::default()
-        .load(WEIGHTS, &device)
-        .expect("embedded weights match the model definition");
-    config.init::<NdArray>(&device).load_record(record)
+let detector = PatternDetector::new();          // deserialises the embedded weights once
+let frame = image::open("photo.jpg")?;
+if let Some(corners) = detector.find_corners(&frame, 0.5) {
+    // [TL, TR, BR, BL] in frame pixels, canonical order (see *Orientation ambiguity*)
 }
 ```
 
-`Detector::detect(&pixels, &device)` then returns a `Detection` with
-`probability` and normalised `corners`.  For a `W × H` camera frame:
+`PatternDetector::detect` returns the raw normalised `Detection`;
+`detect_prepared` accepts an already downscaled `input_size × input_size`
+luminance plane (what a camera pipeline can deliver directly), and `load()`
+gives the bare `Detector<NdArray>` for batches or heat-map inspection.  For a
+`W × H` frame the pipeline is: grayscale + stretch to `input_size ×
+input_size` (`prepare_image`, same as `phonopaper_train::infer`), `detect`,
+then `detection.corners_in_pixels(W, H)`.
 
-1. convert to grayscale and resize (stretch) to `input_size × input_size`
-   (same as `phonopaper_train::infer::prepare_image`);
-2. call `detect`;
-3. if `probability ≥ 0.5`, `detection.canonical().corners_in_pixels(W, H)`
-   gives the four corners in frame coordinates, clockwise, with the marker
-   bands along `c0→c1` and `c2→c3` (see *Orientation ambiguity* above).
-
-### 4.4 Use the corners
+### 4.3 Use the corners
 
 With the four corners you can either:
 
 * **rectify** the pattern: compute the homography mapping the detected quad to
-  an upright rectangle (`phonopaper_dataset::geometry::Homography::from_quads`
-  is a dependency-free reference implementation you may copy) and sample the
-  image column by column — then feed the columns to
-  `phonopaper_rs::decode::column_amplitudes_from_image` with `DataBounds`
-  derived from the marker geometry; or
+  an upright rectangle and resample the image, then run the usual upright
+  decoding on the result — this is what `phonopaper-android` does
+  (`rectify_pattern` in `phonopaper-android/src/lib.rs`, with a small white
+  border so the stripe detector sees a light run before the first stripe;
+  `phonopaper_dataset::geometry::Homography` is the same maths); or
 * **seed the existing detector**: run `detect_markers_at_column` only on
   columns inside the detected quad, which removes the false positives that
   motivated this work.
@@ -434,13 +434,6 @@ With the four corners you can either:
 Corner accuracy is roughly ±2 px at the 128 px network resolution, i.e.
 ±1.5 % of the frame.  For sub-pixel precision, refine each corner with a local
 edge search in the full-resolution frame.
-
-### 4.5 Keep the gates green
-
-Adding burn to the library changes the dependency set, so run the six checks
-from `AGENTS.md`, add tests for the new public functions (e.g. a round-trip
-that renders a pattern with `spectrogram_to_image`, warps it and checks that
-the detector finds its corners), and update the coverage baselines.
 
 ---
 
