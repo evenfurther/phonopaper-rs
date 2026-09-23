@@ -13,7 +13,13 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 image = "0.25"
 jni = "0.22"
-phonopaper-rs = { path = "../phonopaper-rs", version = "0.1.0" }
+# The neural-network detector locates the sheet in camera frames before the
+# stripe detector reads it; the trained weights are embedded in the library.
+phonopaper-rs = { path = "../phonopaper-rs", version = "0.1.0", features = ["nn-detector"] }
+
+[dev-dependencies]
+# Projective warps to build camera-like test scenes.
+imageproc = "0.27.0"
 
 [lints]
 workspace = true

@@ -12,7 +12,17 @@ categories = ["multimedia::audio", "encoding"]
 [lints]
 workspace = true
 
+[features]
+# Neural-network pattern detector (`decode::nn`): finds a PhonoPaper sheet
+# and its four corners in a camera frame.  Pulls in burn (inference only,
+# CPU `ndarray` backend) and embeds the ≈ 1.2 MB trained weights.
+nn-detector = ["dep:burn"]
+
 [dependencies]
+# Inference engine for the optional neural-network detector.  Neither the
+# `train` nor the `autodiff` feature is needed, which keeps the dependency
+# tree small enough for the Android `cdylib`.
+burn = { version = "0.21", default-features = false, features = ["std", "ndarray"], optional = true }
 # Image loading and saving (PNG, JPEG)
 image = "0.25"
 # WAV file reading and writing
