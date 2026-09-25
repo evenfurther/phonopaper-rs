@@ -27,8 +27,9 @@ This repository contains a Cargo workspace plus an Android app:
 |---|---|---|
 | `phonopaper-rs` | `phonopaper-rs/` | Core library — encode, decode, render, vector output |
 | `phonopaper-cli` | `phonopaper-cli/` | `phonopaper` binary — four subcommands |
-| `phonopaper-android` | `phonopaper-android/` | JNI bridge crate that exposes Rust decoding to Android |
+| `phonopaper-android` | `phonopaper-android/` | JNI bridge crate that exposes Rust detection (neural network) and decoding to Android |
 | Android app | `android-app/` | Kotlin UI with live camera preview, capture/manual scrubbing controls, and a Rust-backed decoder |
+| ML tooling | `phonopaper-ml/` | Separate workspace: deterministic synthetic dataset generator and a [burn](https://burn.dev) trainer for a neural-network pattern detector — see [`phonopaper-ml/README.md`](phonopaper-ml/README.md) |
 
 ---
 
@@ -204,10 +205,15 @@ It keeps the UI in Kotlin but performs the `PhonoPaper` decoding pipeline in the
 
 Current app flow:
 
-- open the live camera preview and highlight the detected `PhonoPaper` data band in real time
+- open the live camera preview and outline the `PhonoPaper` sheet found by the
+  neural-network detector (`phonopaper_rs::decode::nn`) in real time, whatever
+  its rotation or perspective — the thicker edges of the outline are the
+  marker bands
 - automatically decode and play the current camera frame when live auto-play is enabled
 - capture the current camera frame or pick a `PhonoPaper` image from Android's document picker
-- decode it in Rust with the robust per-column marker interpolation path
+- decode it in Rust: the detected quadrilateral is rectified to an upright
+  image with a homography, then read with the robust per-column marker
+  interpolation path (images that are already upright are read directly)
 - play the synthesized mono PCM audio with `AudioTrack`, either from the current seek position or by scrubbing directly on the image preview
 
 The Android resources also include a dedicated adaptive launcher icon so installed builds appear with a branded app icon in the launcher.
@@ -235,6 +241,12 @@ phonopaper-rs = "0.1.0"
 
 > The crate name on disk is `phonopaper-rs`; the Rust module name is
 > `phonopaper_rs`.
+
+Optional Cargo features:
+
+| Feature | Effect |
+|---|---|
+| `nn-detector` | Enables `phonopaper_rs::decode::nn`, a neural-network detector that finds a `PhonoPaper` sheet and its four corners in a camera frame.  Pulls in [burn](https://burn.dev) (CPU inference only) and embeds ≈ 1.2 MB of trained weights. |
 
 ### Decode an image to a WAV file
 
@@ -306,6 +318,32 @@ std::fs::write("code.pdf", spectrogram_to_pdf(&spec, &render, PdfPageLayout::Fit
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+### Find a pattern in a camera frame (`nn-detector` feature)
+
+The hand-written `detect_markers` expects an upright, axis-aligned pattern.
+With the `nn-detector` feature, a small convolutional network trained on
+synthetic data (see [`phonopaper-ml/`](phonopaper-ml/README.md)) tells whether
+a frame contains a pattern at all and where its four corners are, whatever its
+rotation, perspective or scale:
+
+```rust,ignore
+use phonopaper_rs::decode::nn::PatternDetector;
+
+let detector = PatternDetector::new(); // loads the embedded weights; keep it around
+let frame = image::open("photo.jpg")?;
+if let Some(corners) = detector.find_corners(&frame, 0.5) {
+    // `corners` are [TL, TR, BR, BL] in frame pixels, clockwise; the marker
+    // bands run along TL→TR and BR→BL.  A sheet looks the same upside down,
+    // so which of those two edges is the high-frequency end is not knowable
+    // from the image alone.
+    println!("pattern at {corners:?}");
+}
+```
+
+The frame is converted to grayscale and stretched to the 128 × 128 network
+input internally; corner accuracy is about ±2 px at that resolution, i.e.
+±1.5 % of the frame.
+
 ---
 
 ## Public API overview
@@ -320,6 +358,7 @@ std::fs::write("code.pdf", spectrogram_to_pdf(&spec, &render, PdfPageLayout::Fit
 | `phonopaper_rs::audio` | `read_audio_file` (WAV + MP3 → mono `f32` + sample rate) |
 | `phonopaper_rs::encode` | `AnalysisOptions`, `audio_to_spectrogram`, `encode_audio_to_image` |
 | `phonopaper_rs::decode` | `SynthesisOptions`, `AmplitudeMode`, `Synthesizer<SPS>`, `DataBounds`, `detect_markers`, `detect_markers_at_column`, `column_amplitudes_from_image`, `spectrogram_to_audio`, `decode_image_to_wav`, `decode_image_to_wav_sps` |
+| `phonopaper_rs::decode::nn` (`nn-detector` feature) | `PatternDetector`, `Detection`, `Detector`, `DetectorConfig`, `load`, `prepare_image`, `embedded_config` |
 
 ---
 
@@ -352,6 +391,13 @@ cargo test --workspace
 cargo bench -p phonopaper-rs
 ```
 
+The optional neural-network detector is not built by default; check it with:
+
+```bash
+cargo clippy -p phonopaper-rs --all-targets --features nn-detector
+cargo test -p phonopaper-rs --features nn-detector
+```
+
 When you touch the Android integration, also build the APK:
 
 ```bash
@@ -360,6 +406,16 @@ cd android-app
 ```
 
 The produced release APK is intended for test installs, not store distribution.
+
+The machine-learning tooling in `phonopaper-ml/` is its own workspace and has
+the same formatting / clippy / test gates:
+
+```bash
+cd phonopaper-ml
+cargo fmt --check --all
+cargo clippy --workspace --all-targets
+cargo test --workspace
+```
 
 Coverage (informational, not a hard gate):
 

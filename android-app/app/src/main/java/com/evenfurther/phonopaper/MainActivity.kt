@@ -242,13 +242,13 @@ class MainActivity : AppCompatActivity() {
 
         cameraExecutor.execute {
             try {
-                val bounds = PhonopaperNative.detectPreviewBounds(bytes)
+                val corners = PhonopaperNative.detectPatternCorners(bytes)
                 val shouldAutoplay =
-                    bounds != null && autoplayEnabled && playbackIdle && autoplayCooldownElapsed
+                    corners != null && autoplayEnabled && playbackIdle && autoplayCooldownElapsed
                 val livePcm = if (shouldAutoplay) PhonopaperNative.decodeImageToPcm(bytes) else null
                 runOnUiThread {
-                    updateCameraOverlay(bounds, bitmap.height)
-                    if (bounds == null) {
+                    updateCameraOverlay(corners)
+                    if (corners == null) {
                         cameraStatusText.text = getString(R.string.camera_searching)
                     } else {
                         cameraStatusText.text = getString(R.string.camera_detected)
@@ -270,14 +270,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateCameraOverlay(bounds: IntArray?, bitmapHeight: Int) {
-        if (bounds == null || bitmapHeight <= 0) {
+    private fun updateCameraOverlay(corners: FloatArray?) {
+        if (corners == null) {
             detectionOverlay.clearDetection()
             return
         }
-        val top = bounds[0] / bitmapHeight.toFloat()
-        val bottom = bounds[1] / bitmapHeight.toFloat()
-        detectionOverlay.setDetection(top, bottom)
+        // The analysed bitmap is a snapshot of the preview view, so fractions
+        // of its size are fractions of the overlay's size.
+        detectionOverlay.setDetection(corners)
     }
 
     private fun captureCurrentFrame() {

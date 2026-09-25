@@ -16,8 +16,10 @@ phonopaper-rs/           ← repo root (workspace)
 │       ├── ci.yml       ← fmt, clippy, test, Android APK, IAI benchmarks
 │       └── coverage.yml ← cargo-llvm-cov, posts diff comment on PRs
 ├── phonopaper-rs/       ← library crate (published to crates.io)
-│   ├── Cargo.toml
+│   ├── Cargo.toml       ← optional `nn-detector` feature (burn, inference only)
 │   ├── src/
+│   │   └── decode/nn/   ← neural-network detector: model.rs (copied from
+│   │                       phonopaper-ml), embedded model.bin + model.json
 │   ├── tests/           ← integration tests + fixtures
 │   ├── benches/         ← Criterion and IAI-Callgrind benchmarks
 │   └── examples/        ← developer / research examples
@@ -34,21 +36,33 @@ phonopaper-rs/           ← repo root (workspace)
 ├── phonopaper-android/  ← Rust `cdylib` JNI bridge for Android
 │   ├── Cargo.toml
 │   └── src/lib.rs
-└── android-app/         ← Kotlin Android app that calls the Rust bridge
-    ├── build.gradle
-    ├── settings.gradle
-    ├── gradlew
-    └── app/
-        ├── build.gradle
-        └── src/main/
-            ├── AndroidManifest.xml
-            ├── java/com/evenfurther/phonopaper/
-            └── res/
+├── android-app/         ← Kotlin Android app that calls the Rust bridge
+│   ├── build.gradle
+│   ├── settings.gradle
+│   ├── gradlew
+│   └── app/
+│       ├── build.gradle
+│       └── src/main/
+│           ├── AndroidManifest.xml
+│           ├── java/com/evenfurther/phonopaper/
+│           └── res/
+└── phonopaper-ml/       ← SEPARATE workspace (excluded from the root one)
+    ├── Cargo.toml       ← [workspace] with its own lock file
+    ├── README.md        ← dataset → training → model-transfer instructions
+    ├── phonopaper-dataset/  ← deterministic synthetic dataset generator
+    └── phonopaper-train/    ← burn model, training, eval, inference
 ```
 
 Workspace-level lints (`[workspace.lints.clippy] pedantic = "warn"`) are
 inherited by both crates via `[lints] workspace = true` in each member's
 `Cargo.toml`.
+
+`phonopaper-ml/` is deliberately **not** a member of the root workspace: the
+`burn` dependency tree is large and must not affect the library's lock file,
+build times or coverage.  It is listed under `[workspace] exclude` in the root
+`Cargo.toml` and has the same lint configuration.  Its dataset generator
+depends on `phonopaper-rs` by path so that patterns are rendered by the real
+encoder.
 
 ## Version control
 
@@ -100,6 +114,29 @@ cargo llvm-cov -p phonopaper-rs --tests --ignore-filename-regex='(benches|exampl
 
 Run them in this order. Fix any issues before considering the task done.
 
+The `nn-detector` feature of `phonopaper-rs` is **off by default** so that the
+`burn` dependency tree does not affect the default library build, coverage or
+benchmarks.  `phonopaper-android` enables it (the Android app detects the sheet
+with the network), so `cargo clippy --workspace` and `cargo test --workspace`
+already compile the library with the feature through feature unification; the
+library's own feature-gated tests still need an explicit flag.  When a task
+touches `phonopaper-rs/src/decode/nn/`, `phonopaper-rs/tests/nn.rs` or the
+feature wiring, also run:
+
+```bash
+cargo clippy -p phonopaper-rs --all-targets --features nn-detector
+cargo test -p phonopaper-rs --features nn-detector
+```
+
+`phonopaper-rs/src/decode/nn/model.rs` is a verbatim copy of
+`phonopaper-ml/phonopaper-train/src/model.rs`; burn matches weights by field
+name, so the two files must stay identical and `model.bin` / `model.json`
+must be re-exported from `phonopaper-ml` whenever the architecture changes.
+`phonopaper-ml/phonopaper-train/tests/embedded.rs` enforces both (file
+identity, and that the embedded weights load with exactly the parameter
+shapes of `model.json`); run `cargo test -p phonopaper-train --test embedded`
+from `phonopaper-ml/` after touching any of these files.
+
 When a task changes `phonopaper-android/` or `android-app/`, also run:
 
 ```bash
@@ -108,6 +145,22 @@ cd android-app
 ```
 
 This verifies the Android Gradle project, JNI bridge, and APK packaging path used by CI.
+
+When a task changes `phonopaper-ml/`, also run (from that directory) the same
+three checks in that workspace:
+
+```bash
+cd phonopaper-ml
+cargo fmt --check --all
+cargo clippy --workspace --all-targets
+cargo test --workspace
+```
+
+The dataset generator must stay **bit-for-bit deterministic**: do not
+introduce `rand`, `HashMap` iteration order, transcendental float functions
+(`sin`, `exp`, `powf`, …) or thread-order-dependent state into it.  The
+`tests/dataset.rs` determinism test must keep passing.  Keep
+`phonopaper-ml/README.md` in sync with the CLI options and the model layout.
 
 > **Performance gate:** after running `cargo bench`, compare the results against
 > the baseline below.  A change is acceptable if every benchmark stays within
@@ -212,6 +265,12 @@ the documented baselines stay in sync with the repository.
 A change is acceptable if **every file stays at or above its baseline** for all
 three metrics (regions, functions, lines).  New public functions added without
 accompanying tests will lower the numbers and must be caught before merging.
+
+The canonical command builds with default features, so `decode/nn/*.rs` (the
+`nn-detector` feature) does not appear in the table.  Its tests live in
+`tests/nn.rs`; when changing that module, check its coverage separately with
+`cargo llvm-cov -p phonopaper-rs --tests --features nn-detector
+--ignore-filename-regex='(benches|examples)' --summary-only`.
 
 **Known permanently-uncovered lines** (do not attempt to cover these):
 

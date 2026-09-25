@@ -1,0 +1,28 @@
+[package]
+name = "phonopaper-dataset"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Deterministic synthetic dataset generator for training a PhonoPaper pattern detector."
+
+[lints]
+workspace = true
+
+[dependencies]
+# The reference renderer: patterns are drawn by the same code the decoder expects.
+phonopaper-rs = { path = "../../phonopaper-rs" }
+# PNG output
+image = { version = "0.25", default-features = false, features = ["png"] }
+# Command-line parsing
+clap = { version = "4", features = ["derive"] }
+# Deterministic parallel generation (each image has an independent RNG stream)
+rayon = "1"
+# manifest.json
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

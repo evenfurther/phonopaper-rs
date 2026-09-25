@@ -16,9 +16,12 @@
 //! | [`image`]   | [`image_to_spectrogram`], [`column_amplitudes_from_image`], [`column_amplitudes_from_image_into`] |
 //! | [`synth`]   | [`AmplitudeMode`], [`SynthesisOptions`], [`Synthesizer`], [`spectrogram_to_audio`] |
 //! | [`wav`]     | [`decode_image_to_wav`], [`decode_image_to_wav_sps`], [`write_wav`] |
+//! | [`nn`]      | Neural-network pattern detector (`nn-detector` feature): `PatternDetector`, `Detection` |
 
 pub mod image;
 pub mod markers;
+#[cfg(feature = "nn-detector")]
+pub mod nn;
 pub mod synth;
 pub mod wav;
 
