@@ -111,12 +111,12 @@ fn corner_errors(det: &Detection, item: &Item, px_per_unit: f64) -> ([f64; 4], f
 ///
 /// Returns a message when the dataset cannot be loaded or does not match the
 /// model input size.
-pub fn evaluate<B: Backend>(
-    model: &Detector<B>,
+pub fn evaluate(
+    model: &Detector,
     dataset_dir: &Path,
     split: Split,
     batch_size: usize,
-    device: &B::Device,
+    device: &Device,
 ) -> Result<Metrics, String> {
     let (valid, size) = load_split(dataset_dir, split)?;
     if size != model.input_size() {
@@ -125,7 +125,10 @@ pub fn evaluate<B: Backend>(
             model.input_size()
         ));
     }
-    let items: Vec<Item> = valid.iter().collect();
+    let items: Vec<Item> = valid
+        .iter()
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
     #[expect(clippy::cast_precision_loss, reason = "image side is a small integer")]
     let px_per_unit = size as f64;
 
@@ -136,11 +139,7 @@ pub fn evaluate<B: Backend>(
     let (mut within2pct, mut within5pct) = (0usize, 0usize);
 
     for chunk in items.chunks(batch_size.max(1)) {
-        let output = model.forward(
-            DetectionBatcher::assemble(chunk)
-                .to_device::<B>(device)
-                .images,
-        );
+        let output = model.forward(DetectionBatcher::assemble(chunk).to_device(device).images);
         for (det, item) in decode_output(&output).iter().zip(chunk) {
             let predicted = det.probability >= 0.5;
             let truth = item.present();

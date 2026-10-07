@@ -80,15 +80,15 @@ pub struct DetectorConfig {
 
 /// One `conv → BatchNorm → ReLU → maxpool` stage.
 #[derive(Module, Debug)]
-pub struct ConvBlock<B: Backend> {
-    conv: Conv2d<B>,
-    norm: BatchNorm<B>,
+pub struct ConvBlock {
+    conv: Conv2d,
+    norm: BatchNorm,
     activation: Relu,
     pool: MaxPool2d,
 }
 
-impl<B: Backend> ConvBlock<B> {
-    fn new(in_channels: usize, out_channels: usize, device: &B::Device) -> Self {
+impl ConvBlock {
+    fn new(in_channels: usize, out_channels: usize, device: &Device) -> Self {
         Self {
             conv: Conv2dConfig::new([in_channels, out_channels], [3, 3])
                 .with_padding(PaddingConfig2d::Same)
@@ -100,7 +100,7 @@ impl<B: Backend> ConvBlock<B> {
         }
     }
 
-    fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
+    fn forward(&self, x: Tensor<4>) -> Tensor<4> {
         let x = self.conv.forward(x);
         let x = self.norm.forward(x);
         let x = self.activation.forward(x);
@@ -110,12 +110,12 @@ impl<B: Backend> ConvBlock<B> {
 
 /// The `PhonoPaper` pattern detector.
 #[derive(Module, Debug)]
-pub struct Detector<B: Backend> {
-    blocks: Vec<ConvBlock<B>>,
-    presence: Linear<B>,
-    corner_conv: Conv2d<B>,
-    corner_norm: BatchNorm<B>,
-    corner_out: Conv2d<B>,
+pub struct Detector {
+    blocks: Vec<ConvBlock>,
+    presence: Linear,
+    corner_conv: Conv2d,
+    corner_norm: BatchNorm,
+    corner_out: Conv2d,
     activation: Relu,
     input_size: usize,
 }
@@ -126,7 +126,7 @@ impl DetectorConfig {
     /// # Panics
     ///
     /// Panics if `input_size` is not a positive multiple of 32.
-    pub fn init<B: Backend>(&self, device: &B::Device) -> Detector<B> {
+    pub fn init(&self, device: &Device) -> Detector {
         assert!(
             self.input_size > 0 && self.input_size.is_multiple_of(32),
             "input_size must be a positive multiple of 32, got {}",
@@ -159,7 +159,7 @@ impl DetectorConfig {
     }
 }
 
-impl<B: Backend> Detector<B> {
+impl Detector {
     /// Side of the expected square input.
     #[must_use]
     pub fn input_size(&self) -> usize {
@@ -176,7 +176,7 @@ impl<B: Backend> Detector<B> {
     ///
     /// `images` has shape `[batch, 1, input_size, input_size]` with values in
     /// `[0, 1]`.  Returns `[batch, 9]` (see the module documentation).
-    pub fn forward(&self, images: Tensor<B, 4>) -> Tensor<B, 2> {
+    pub fn forward(&self, images: Tensor<4>) -> Tensor<2> {
         let mut x = images;
         let mut fine = None;
         let mut coarse = None;
@@ -207,12 +207,11 @@ impl<B: Backend> Detector<B> {
     ///
     /// Useful for visualisation and debugging; [`Detector::forward`] applies
     /// the soft-argmax for you.
-    pub fn heatmaps(&self, fine: Tensor<B, 4>, coarse: Tensor<B, 4>) -> Tensor<B, 4> {
+    pub fn heatmaps(&self, fine: Tensor<4>, coarse: Tensor<4>) -> Tensor<4> {
         let [_, _, h, w] = fine.dims();
         let upsampled = interpolate(
             coarse,
-            [h, w],
-            InterpolateOptions::new(InterpolateMode::Nearest),
+            InterpolateOptions::new(InterpolateMode::Nearest).with_output_size([h, w]),
         );
         let x = Tensor::cat(vec![fine, upsampled], 1);
         let x = self.corner_conv.forward(x);
@@ -228,10 +227,10 @@ impl<B: Backend> Detector<B> {
     /// # Panics
     ///
     /// Panics if `pixels.len() != input_size²`.
-    pub fn detect(&self, pixels: &[u8], device: &B::Device) -> Detection {
+    pub fn detect(&self, pixels: &[u8], device: &Device) -> Detection {
         let n = self.input_size;
         assert_eq!(pixels.len(), n * n, "expected {n}×{n} pixels");
-        let input = image_tensor::<B>(pixels, n, device).unsqueeze::<4>();
+        let input = image_tensor(pixels, n, device).unsqueeze::<4>();
         let output = self.forward(input);
         decode_output(&output)[0]
     }
@@ -239,9 +238,9 @@ impl<B: Backend> Detector<B> {
 
 /// Convert an 8-bit grayscale image to a `[1, size, size]` tensor in `[0, 1]`.
 #[must_use]
-pub fn image_tensor<B: Backend>(pixels: &[u8], size: usize, device: &B::Device) -> Tensor<B, 3> {
+pub fn image_tensor(pixels: &[u8], size: usize, device: &Device) -> Tensor<3> {
     let floats: Vec<f32> = pixels.iter().map(|&p| f32::from(p) / 255.0).collect();
-    Tensor::<B, 1>::from_floats(floats.as_slice(), device).reshape([1, size, size])
+    Tensor::<1>::from_floats(floats.as_slice(), device).reshape([1, size, size])
 }
 
 /// Soft-argmax of `[batch, 4, h, w]` heat-maps → `[batch, 8]` coordinates
@@ -250,7 +249,7 @@ pub fn image_tensor<B: Backend>(pixels: &[u8], size: usize, device: &B::Device) 
 /// Each heat-map is soft-maxed over its `h·w` cells and the coordinate is the
 /// probability-weighted mean of the cell centres, laid out on a grid spanning
 /// `[GRID_MIN, GRID_MAX]` in both directions.
-pub fn soft_argmax<B: Backend>(heatmaps: Tensor<B, 4>) -> Tensor<B, 2> {
+pub fn soft_argmax(heatmaps: Tensor<4>) -> Tensor<2> {
     let [batch, corners, h, w] = heatmaps.dims();
     let device = heatmaps.device();
     let flat = heatmaps.reshape([batch, corners, h * w]);
@@ -269,8 +268,8 @@ pub fn soft_argmax<B: Backend>(heatmaps: Tensor<B, 4>) -> Tensor<B, 2> {
             ys.push(centre(row, h));
         }
     }
-    let grid_x = Tensor::<B, 1>::from_floats(xs.as_slice(), &device).reshape([1, 1, h * w]);
-    let grid_y = Tensor::<B, 1>::from_floats(ys.as_slice(), &device).reshape([1, 1, h * w]);
+    let grid_x = Tensor::<1>::from_floats(xs.as_slice(), &device).reshape([1, 1, h * w]);
+    let grid_y = Tensor::<1>::from_floats(ys.as_slice(), &device).reshape([1, 1, h * w]);
 
     let x = (weights.clone() * grid_x).sum_dim(2); // [batch, 4, 1]
     let y = (weights * grid_y).sum_dim(2); // [batch, 4, 1]
@@ -337,15 +336,18 @@ impl Detection {
 /// Panics if the tensor data cannot be read back as `f32`, which cannot
 /// happen for a float tensor produced by [`Detector::forward`].
 #[must_use]
-pub fn decode_output<B: Backend>(output: &Tensor<B, 2>) -> Vec<Detection> {
+pub fn decode_output(output: &Tensor<2>) -> Vec<Detection> {
     let [batch, _] = output.dims();
     let logits = output.clone().narrow(1, 0, 1);
-    let probabilities: Vec<f32> = sigmoid(logits).into_data().to_vec().expect("f32 data");
+    let probabilities: Vec<f32> = sigmoid(logits)
+        .into_data()
+        .try_into_vec::<f32>()
+        .expect("f32 data");
     let coords: Vec<f32> = output
         .clone()
         .narrow(1, 1, 8)
         .into_data()
-        .to_vec()
+        .try_into_vec::<f32>()
         .expect("f32 data");
     (0..batch)
         .map(|i| {

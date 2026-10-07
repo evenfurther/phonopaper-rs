@@ -43,11 +43,11 @@ pub fn prepare_image(img: &image::DynamicImage, size: u32) -> Vec<u8> {
 /// # Errors
 ///
 /// Returns a message when the image cannot be opened.
-pub fn infer_file<B: Backend>(
-    model: &Detector<B>,
+pub fn infer_file(
+    model: &Detector,
     path: &Path,
     threshold: f32,
-    device: &B::Device,
+    device: &Device,
 ) -> Result<FileDetection, String> {
     let img = image::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let size = u32::try_from(model.input_size()).map_err(|e| e.to_string())?;
