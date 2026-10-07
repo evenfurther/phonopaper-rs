@@ -9,7 +9,7 @@ affects the library, its lock file or its quality gates.
 | Crate | Purpose |
 |---|---|
 | `phonopaper-dataset` | Deterministic synthetic dataset generator (images + `labels.csv`) |
-| `phonopaper-train`   | Model definition, training, evaluation and inference with burn 0.22 |
+| `phonopaper-train`   | Model definition, training, evaluation and inference with Burn 0.22 |
 
 The end-to-end workflow is:
 
@@ -120,13 +120,17 @@ across all data columns — the white margins are not included.
 | *(default)* `flex` | CPU | Pure Rust, works everywhere; ~3 s per batch of 32 |
 | `--no-default-features --features wgpu` | GPU via Vulkan/Metal/DX12 | Needs only the graphics driver; ~0.35 s per batch on an RTX A2000 at full clocks |
 | `--no-default-features --features cuda` | NVIDIA GPU | Needs the CUDA toolkit (`libnvrtc`) installed |
-| `--no-default-features --features ndarray` | CPU | Legacy backend, ~10× slower than `flex` |
 | add `--features tui` | — | Interactive terminal dashboard instead of plain logs |
 
-> Neither GPU feature enables burn's `fusion` layer: with burn 0.21 it has
-> produced an invalid CUDA kernel at export time and crashed mid-training on
-> wgpu (`Should have handle for tensor …`).  Plain kernels are somewhat
-> slower but reliable.
+Burn 0.22 selects the backend at runtime through `Device`; model and tensor
+types no longer carry backend parameters. The CPU `flex` backend is also used
+for loading and exporting models regardless of the training device. Burn 0.22
+requires Rust 1.95 or newer.
+
+> Neither GPU feature enables Burn's `fusion` layer: it previously produced an
+> invalid CUDA kernel at export time and crashed mid-training on wgpu
+> (`Should have handle for tensor …`). Plain kernels are somewhat slower but
+> reliable.
 
 > **NixOS / Vulkan:** the Vulkan loader must be reachable, e.g.
 > `export LD_LIBRARY_PATH=/run/opengl-driver/lib`.
@@ -164,7 +168,7 @@ rest is the training split.
 Training keeps **every** epoch's checkpoint in `artifacts/checkpoint/`
 (≈ 4 MB each with optimiser state) while it runs.  When it ends (after
 `--epochs` or by early stopping), the epoch with the lowest mean validation
-loss is exported to `model.bin` — on the CPU, independently of the training
+loss is exported to `model.bpk` — on the CPU, independently of the training
 backend — and the checkpoints are pruned to that epoch and the last one.
 
 > burn's metric-based checkpointing strategy is deliberately not used: it
@@ -181,7 +185,7 @@ cargo run --release -p phonopaper-train -- export --artifacts artifacts --epoch 
 ```
 
 `export` prints the mean validation loss of every epoch it can find in
-`artifacts/valid/`, then writes `model.mpk` and `model.bin`.  Only epochs
+`artifacts/valid/`, then writes `model.bpk`. Only epochs
 still present in `artifacts/checkpoint/` can be exported.
 
 ### Overfitting
@@ -213,9 +217,12 @@ The artifact directory receives burn's logs and per-epoch checkpoints plus:
 |---|---|
 | `model.json` | `DetectorConfig` (input size, corner-head width) |
 | `training.json` | All training hyper-parameters |
-| `model.mpk` | Full-precision copy of the exported epoch (`NamedMpkFileRecorder`) |
-| `model.bin` | **Weights to embed** (`BinFileRecorder`, full precision, ≈ 1.1 MB) |
-| `checkpoint/` | Per-epoch checkpoints (all during training; best + last afterwards) |
+| `model.bpk` | **Weights to embed** (Burnpack format) |
+| `checkpoint/` | Per-epoch model, optimizer and scheduler checkpoints (all during training; best + last afterwards) |
+
+Burn 0.22 stores checkpoints in Burnpack format. Older Burn recorder files
+(`.mpk` / `.bin`) cannot be loaded directly; migrate their model weights via
+SafeTensors as described in the [Burn 0.22 migration guide](https://burn.dev/books/burn/migrating-to-0.22.html#migrating-checkpoints).
 
 ### The network
 
@@ -294,7 +301,7 @@ Variables: `REPO`, `DATASET`, `DATASET_COUNT`, `ARTIFACTS` (default
 `artifacts-<jobid>`), `EPOCHS`, `BATCH_SIZE`, `LEARNING_RATE`, `PATIENCE`,
 `WORKERS`, `SEED`, `BACKEND` (`cuda` or `wgpu`), `CUDA_MODULE`,
 `CARGO_TARGET_DIR`.  Output lands in `phonopaper-train-<jobid>.out` in the
-submission directory; the trained model is `<ARTIFACTS>/model.bin`.
+submission directory; the trained model is `<ARTIFACTS>/model.bpk`.
 
 > The RTX 6000 Pro script uses the Vulkan `wgpu` backend, which needs only
 > the graphics driver.  With `BACKEND=cuda` on that (Blackwell) GPU the CUDA
@@ -325,7 +332,7 @@ on a 120 px one.  Comparing the
 two splits tells **under-fitting** (both poor → train longer / stronger
 signal) from **over-fitting** (train good, valid poor → more data).
 `--epoch N` evaluates the checkpoint of epoch `N` (it must still exist in
-`artifacts/checkpoint/`) instead of the exported `model.bin`, so epochs can
+`artifacts/checkpoint/`) instead of the exported `model.bpk`, so epochs can
 be compared without re-exporting.
 
 ```bash
@@ -334,7 +341,7 @@ cargo run --release -p phonopaper-train -- infer --artifacts artifacts photo1.jp
 
 prints one JSON object per image with `probability`, `present` (threshold
 `--threshold`, default 0.5) and `corners` in **original image pixels**.
-`--epoch N` uses a checkpoint instead of `model.bin`, as for `eval`.  The
+`--epoch N` uses a checkpoint instead of `model.bpk`, as for `eval`. The
 image is converted to grayscale and stretched (aspect ratio not preserved) to
 the network input size; the normalised corners are mapped back by multiplying
 with the original width and height.
@@ -357,9 +364,9 @@ it (`phonopaper_android::rectify_pattern`).  The pieces in the library are:
 
 | File in `phonopaper-rs/` | Content |
 |---|---|
-| `Cargo.toml` | `nn-detector = ["dep:burn"]`; `burn` with only `std` + `ndarray` (inference on the CPU, no `train` / `autodiff`) |
+| `Cargo.toml` | `nn-detector = ["dep:burn"]`; `burn` with only `std` + `flex` (inference on the CPU, no `train` / `autodiff`) |
 | `src/decode/nn/model.rs` | **Verbatim copy** of `phonopaper-train/src/model.rs` |
-| `src/decode/nn/model.bin`, `model.json` | The exported weights and their `DetectorConfig`, embedded with `include_bytes!` |
+| `src/decode/nn/model.bpk`, `model.json` | The exported Burnpack weights and their `DetectorConfig`, embedded with `include_bytes!` |
 | `src/decode/nn/mod.rs` | `load()`, `prepare_image()` and the `PatternDetector` wrapper |
 | `tests/nn.rs` | Renders a pattern with `spectrogram_to_image`, warps it into a scene and checks that the detector finds its corners; negatives; ordering helpers |
 
@@ -368,7 +375,7 @@ it (`phonopaper_android::rectify_pattern`).  The pieces in the library are:
 After a new training run:
 
 ```bash
-cp artifacts/model.bin  ../phonopaper-rs/src/decode/nn/model.bin
+cp artifacts/model.bpk  ../phonopaper-rs/src/decode/nn/model.bpk
 cp artifacts/model.json ../phonopaper-rs/src/decode/nn/model.json
 # only if the architecture changed:
 cp phonopaper-train/src/model.rs ../phonopaper-rs/src/decode/nn/model.rs
@@ -376,12 +383,11 @@ cp phonopaper-train/src/model.rs ../phonopaper-rs/src/decode/nn/model.rs
 
 burn's recorders match weights **by field name**, so `model.rs` must be
 identical in both crates and the weights must have been exported from that
-very definition, or `load()` panics at start-up.  Note that burn does *not*
-check tensor shapes when loading: weights exported with a different `hidden`
-or channel width load silently and only misbehave later.
+very definition, or `load()` panics at start-up. Burnpack records validate
+parameter names and shapes when loading.
 `phonopaper-train/tests/embedded.rs` guards against both mistakes — it
 compares the two `model.rs` byte for byte and checks that the embedded
-`model.bin` loads with exactly the parameter shapes of `model.json`:
+`model.bpk` loads with exactly the parameter shapes of `model.json`:
 
 ```bash
 cargo test -p phonopaper-train --test embedded
@@ -412,7 +418,7 @@ if let Some(corners) = detector.find_corners(&frame, 0.5) {
 `PatternDetector::detect` returns the raw normalised `Detection`;
 `detect_prepared` accepts an already downscaled `input_size × input_size`
 luminance plane (what a camera pipeline can deliver directly), and `load()`
-gives the bare `Detector<NdArray>` for batches or heat-map inspection.  For a
+gives the bare backend-free `Detector` for batches or heat-map inspection. For a
 `W × H` frame the pipeline is: grayscale + stretch to `input_size ×
 input_size` (`prepare_image`, same as `phonopaper_train::infer`), `detect`,
 then `detection.corners_in_pixels(W, H)`.
@@ -447,5 +453,5 @@ cargo clippy --workspace --all-targets
 cargo test --workspace
 ```
 
-(`cargo test` for `phonopaper-train` always uses the small `ndarray` backend
+(`cargo test` for `phonopaper-train` always uses the portable `flex` backend
 through a dev-dependency, whatever features are selected.)

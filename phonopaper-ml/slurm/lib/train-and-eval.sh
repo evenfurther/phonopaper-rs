@@ -11,7 +11,7 @@
 #      (target/cpu-<model>/);
 #   2. generates the dataset if $DATASET does not exist yet (CPU-bound);
 #   3. trains with early stopping — the best-validation epoch is exported
-#      to $ARTIFACTS/model.bin automatically;
+#      to $ARTIFACTS/model.bpk automatically;
 #   4. evaluates that best epoch (by checkpoint number) on the validation
 #      and training splits.
 #
@@ -89,7 +89,7 @@ if [ ! -f "$DATASET/manifest.json" ]; then
     "${DATASET_BIN[@]}" --output "$DATASET" --count "$DATASET_COUNT"
 fi
 
-# ─── 3. Train (exports the best-validation epoch to $ARTIFACTS/model.bin) ────
+# ─── 3. Train (exports the best-validation epoch to $ARTIFACTS/model.bpk) ────
 
 echo "== training, $(date)"
 # Log the trainer's resident memory every 5 minutes so memory growth is
@@ -118,14 +118,14 @@ for d in "$ARTIFACTS"/valid/epoch-*; do
 done | sort -t- -k2 -n
 
 # Epoch with the lowest mean validation loss.  `train` has already exported
-# it to $ARTIFACTS/model.bin; we evaluate the checkpoint itself by number so
+# it to $ARTIFACTS/model.bpk; we evaluate the checkpoint itself by number so
 # the log states unambiguously which epoch the figures refer to.
 BEST_EPOCH=$(
     for d in "$ARTIFACTS"/valid/epoch-*; do
         awk -F, -v e="${d##*epoch-}" '{s+=$1;n++} END {printf "%f %s\n", s/n, e}' "$d/Loss.log"
     done | sort -n | head -1 | cut -d' ' -f2
 )
-echo "== best epoch: $BEST_EPOCH (exported to $ARTIFACTS/model.bin)"
+echo "== best epoch: $BEST_EPOCH (exported to $ARTIFACTS/model.bpk)"
 
 # ─── 4. Evaluate the best epoch on both splits ───────────────────────────────
 
@@ -135,4 +135,4 @@ echo "== evaluation of epoch $BEST_EPOCH, $(date)"
 "${TRAIN[@]}" eval --dataset "$DATASET" --artifacts "$ARTIFACTS" --batch-size "$BATCH_SIZE" \
     --epoch "$BEST_EPOCH" --split train
 
-echo "== done, $(date); model: $ML/$ARTIFACTS/model.bin"
+echo "== done, $(date); model: $ML/$ARTIFACTS/model.bpk"

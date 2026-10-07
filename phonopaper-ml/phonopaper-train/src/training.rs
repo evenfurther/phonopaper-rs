@@ -23,10 +23,10 @@ use crate::data::{
 };
 use crate::model::{Detector, DetectorConfig};
 
-/// File name of the training checkpoint (`MessagePack`, full precision).
+/// File name of the exported Burnpack model artifact.
 pub const CHECKPOINT_FILE: &str = "model.bpk";
 /// File name of the exported weights for embedding.
-pub const EXPORT_FILE: &str = "model.bpk";
+pub const EXPORT_FILE: &str = CHECKPOINT_FILE;
 /// File name of the model hyper-parameters.
 pub const MODEL_CONFIG_FILE: &str = "model.json";
 /// File name of the training hyper-parameters.
@@ -420,7 +420,7 @@ pub fn export_checkpoint(artifact_dir: &Path, epoch: Option<usize>) -> Result<()
         .save_file(artifact_dir.join(EXPORT_FILE))
         .map_err(|e| e.to_string())?;
     println!(
-        "exported epoch {epoch} to {} and {} in {}",
+        "exported epoch {epoch} to {} in {}",
         EXPORT_FILE,
         artifact_dir.display()
     );

@@ -2,7 +2,7 @@
 //!
 //! `phonopaper-rs/src/decode/nn/model.rs` must be a verbatim copy of
 //! `src/model.rs` (burn matches weights by field name), and the embedded
-//! `model.bin` / `model.json` must have been exported from that definition.
+//! `model.bpk` / `model.json` must have been exported from that definition.
 //! These tests catch a retraining that changed the architecture without
 //! re-copying the model file or re-exporting the weights, and vice versa.
 
@@ -53,7 +53,7 @@ fn embedded_model_definition_is_identical_to_the_training_one() {
     assert!(
         ours == theirs,
         "phonopaper-rs/src/decode/nn/model.rs differs from phonopaper-train/src/model.rs; \
-         copy the training file over and re-export model.bin from it"
+         copy the training file over and re-export model.bpk from it"
     );
 }
 
