@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use burn::tensor::Device;
 use clap::{Parser, Subcommand};
 use phonopaper_train::data::Split;
 use phonopaper_train::model::DetectorConfig;
@@ -15,41 +16,35 @@ use phonopaper_train::{eval, infer};
 
 #[cfg(feature = "cuda")]
 mod backend {
-    pub type Inference = burn::backend::Cuda;
-    pub fn device() -> burn::backend::cuda::CudaDevice {
-        burn::backend::cuda::CudaDevice::default()
+    pub fn device() -> burn::tensor::Device {
+        burn::tensor::Device::cuda(0)
     }
     pub const NAME: &str = "cuda";
 }
 
 #[cfg(all(feature = "wgpu", not(feature = "cuda")))]
 mod backend {
-    pub type Inference = burn::backend::Wgpu;
-    pub fn device() -> burn::backend::wgpu::WgpuDevice {
-        burn::backend::wgpu::WgpuDevice::default()
+    pub fn device() -> burn::tensor::Device {
+        burn::tensor::Device::wgpu(burn::tensor::DeviceKind::DefaultDevice)
     }
     pub const NAME: &str = "wgpu";
 }
 
 #[cfg(all(feature = "flex", not(any(feature = "wgpu", feature = "cuda"))))]
 mod backend {
-    pub type Inference = burn::backend::Flex;
-    pub fn device() -> burn::backend::flex::FlexDevice {
-        burn::backend::flex::FlexDevice
+    pub fn device() -> burn::tensor::Device {
+        burn::tensor::Device::flex()
     }
     pub const NAME: &str = "flex (CPU)";
 }
 
 #[cfg(not(any(feature = "flex", feature = "wgpu", feature = "cuda")))]
 mod backend {
-    pub type Inference = burn::backend::NdArray;
-    pub fn device() -> burn::backend::ndarray::NdArrayDevice {
-        burn::backend::ndarray::NdArrayDevice::Cpu
+    pub fn device() -> burn::tensor::Device {
+        burn::tensor::Device::flex()
     }
-    pub const NAME: &str = "ndarray (CPU)";
+    pub const NAME: &str = "flex (CPU)";
 }
-
-type Training = burn::backend::Autodiff<backend::Inference>;
 
 // ─── CLI ──────────────────────────────────────────────────────────────────────
 
@@ -150,7 +145,7 @@ enum Command {
 }
 
 fn run(cli: Cli) -> Result<(), String> {
-    let device = backend::device();
+    let device: Device = backend::device();
     eprintln!("backend: {}", backend::NAME);
     match cli.command {
         Command::Train {
@@ -176,7 +171,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 min_lr_fraction,
                 ..TrainingConfig::default()
             };
-            train::<Training>(&dataset, &artifacts, &config, &device)
+            train(&dataset, &artifacts, &config, &device)
         }
         Command::Export { artifacts, epoch } => {
             for (e, loss) in validation_losses(&artifacts).unwrap_or_default() {
@@ -196,7 +191,7 @@ fn run(cli: Cli) -> Result<(), String> {
                 "train" => Split::Train,
                 other => return Err(format!("--split must be `valid` or `train`, got {other:?}")),
             };
-            let model = load_model::<backend::Inference>(&artifacts, epoch, &device)?;
+            let model = load_model(&artifacts, epoch, &device)?;
             let metrics = eval::evaluate(&model, &dataset, split, batch_size, &device)?;
             match epoch {
                 Some(e) => println!("weights: checkpoint of epoch {e}"),
@@ -212,7 +207,7 @@ fn run(cli: Cli) -> Result<(), String> {
             epoch,
             images,
         } => {
-            let model = load_model::<backend::Inference>(&artifacts, epoch, &device)?;
+            let model = load_model(&artifacts, epoch, &device)?;
             for path in &images {
                 let det = infer::infer_file(&model, path, threshold, &device)?;
                 let json = serde_json::to_string(&det).map_err(|e| e.to_string())?;

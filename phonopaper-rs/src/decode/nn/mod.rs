@@ -8,9 +8,9 @@
 //! upright, axis-aligned pattern and is prone to false positives on stripy
 //! backgrounds.
 //!
-//! The trained weights are **embedded in the library** (`model.bin`, ≈ 1.2 MB)
-//! so no file access is needed at run time.  Inference runs on the CPU with
-//! burn's `ndarray` backend and takes a few milliseconds per frame.
+//! The trained weights are **embedded in the library** (`model.bpk`) so no file
+//! access is needed at run time. Inference runs on the CPU with Burn's `flex`
+//! backend and takes a few milliseconds per frame.
 //!
 //! This module is only available with the `nn-detector` Cargo feature.
 //!
@@ -43,11 +43,10 @@
 
 mod model;
 
-use burn::backend::NdArray;
-use burn::backend::ndarray::NdArrayDevice;
 use burn::config::Config as _;
 use burn::module::Module;
-use burn::record::{BinBytesRecorder, FullPrecisionSettings, Recorder};
+use burn::store::ModuleRecord;
+use burn::tensor::Device;
 use image::DynamicImage;
 use image::imageops::FilterType;
 
@@ -55,12 +54,8 @@ pub use model::{
     Detection, Detector, DetectorConfig, OUTPUT_SIZE, decode_output, image_tensor, soft_argmax,
 };
 
-/// The burn backend used for inference.
-pub type Backend = NdArray;
-
-/// Trained weights, exported by `phonopaper-train` with a
-/// `BinFileRecorder<FullPrecisionSettings>`.
-static WEIGHTS: &[u8] = include_bytes!("model.bin");
+/// Trained weights exported by `phonopaper-train` in Burnpack format.
+static WEIGHTS: &[u8] = include_bytes!("model.bpk");
 
 /// The [`DetectorConfig`] the weights were trained with.
 static CONFIG: &[u8] = include_bytes!("model.json");
@@ -87,14 +82,14 @@ pub fn embedded_config() -> DetectorConfig {
 /// Panics if the embedded weights do not match the model definition, which
 /// would be a packaging error of the library itself.
 #[must_use]
-pub fn load() -> Detector<Backend> {
-    let device = NdArrayDevice::Cpu;
-    let record = BinBytesRecorder::<FullPrecisionSettings, &'static [u8]>::default()
-        .load(WEIGHTS, &device)
-        .expect("embedded weights match the model definition");
+pub fn load() -> Detector {
+    let device = Device::flex();
+    let record = ModuleRecord::from_bytes(WEIGHTS.to_vec().into())
+        .expect("embedded weights are a valid Burnpack record");
     embedded_config()
-        .init::<Backend>(&device)
-        .load_record(record)
+        .init(&device)
+        .try_load_record(record)
+        .expect("embedded weights match the model definition")
 }
 
 /// Prepare an image for the network: grayscale, stretched to `size × size`.
@@ -119,8 +114,8 @@ pub fn prepare_image(img: &DynamicImage, size: u32) -> Vec<u8> {
 /// every frame.
 #[derive(Debug)]
 pub struct PatternDetector {
-    model: Detector<Backend>,
-    device: NdArrayDevice,
+    model: Detector,
+    device: Device,
     input_size: u32,
 }
 
@@ -143,7 +138,7 @@ impl PatternDetector {
         let input_size = u32::try_from(model.input_size()).expect("input size fits in u32");
         Self {
             model,
-            device: NdArrayDevice::Cpu,
+            device: Device::flex(),
             input_size,
         }
     }
@@ -157,7 +152,7 @@ impl PatternDetector {
 
     /// The underlying network.
     #[must_use]
-    pub fn model(&self) -> &Detector<Backend> {
+    pub fn model(&self) -> &Detector {
         &self.model
     }
 

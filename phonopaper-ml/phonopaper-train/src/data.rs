@@ -124,23 +124,23 @@ pub struct HostBatch {
 impl HostBatch {
     /// Upload to `device` as a [`DetectionBatch`].
     #[must_use]
-    pub fn to_device<B: Backend>(&self, device: &B::Device) -> DetectionBatch<B> {
+    pub fn to_device(&self, device: &Device) -> DetectionBatch {
         DetectionBatch {
-            images: Tensor::<B, 1>::from_floats(self.pixels.as_slice(), device)
+            images: Tensor::<1>::from_floats(self.pixels.as_slice(), device)
                 .reshape([self.batch, 1, self.size, self.size]),
-            targets: Tensor::<B, 1>::from_floats(self.targets.as_slice(), device)
+            targets: Tensor::<1>::from_floats(self.targets.as_slice(), device)
                 .reshape([self.batch, OUTPUT_SIZE]),
         }
     }
 }
 
-/// A mini-batch on device `B`.
+/// A mini-batch of tensors on a Burn device.
 #[derive(Debug, Clone)]
-pub struct DetectionBatch<B: Backend> {
+pub struct DetectionBatch {
     /// `[batch, 1, size, size]` in `[0, 1]`.
-    pub images: Tensor<B, 4>,
+    pub images: Tensor<4>,
     /// `[batch, 9]`: presence flag + normalised corners.
-    pub targets: Tensor<B, 2>,
+    pub targets: Tensor<2>,
 }
 
 /// Turns [`Item`]s into a [`HostBatch`].
@@ -169,8 +169,8 @@ impl DetectionBatcher {
     }
 }
 
-impl<B: Backend> Batcher<B, Item, HostBatch> for DetectionBatcher {
-    fn batch(&self, items: Vec<Item>, _device: &B::Device) -> HostBatch {
+impl Batcher<Item, HostBatch> for DetectionBatcher {
+    fn batch(&self, items: Vec<Item>, _device: &Device) -> HostBatch {
         Self::assemble(&items)
     }
 }
@@ -178,5 +178,9 @@ impl<B: Backend> Batcher<B, Item, HostBatch> for DetectionBatcher {
 /// Count the positive samples of a dataset.
 #[must_use]
 pub fn count_positives(dataset: &InMemDataset<Item>) -> usize {
-    dataset.iter().filter(Item::present).count()
+    dataset
+        .iter()
+        .filter_map(Result::ok)
+        .filter(Item::present)
+        .count()
 }
