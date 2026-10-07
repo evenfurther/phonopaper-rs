@@ -9,7 +9,7 @@ affects the library, its lock file or its quality gates.
 | Crate | Purpose |
 |---|---|
 | `phonopaper-dataset` | Deterministic synthetic dataset generator (images + `labels.csv`) |
-| `phonopaper-train`   | Model definition, training, evaluation and inference with burn 0.21 |
+| `phonopaper-train`   | Model definition, training, evaluation and inference with burn 0.22 |
 
 The end-to-end workflow is:
 
