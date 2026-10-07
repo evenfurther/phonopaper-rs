@@ -84,7 +84,7 @@ pub fn embedded_config() -> DetectorConfig {
 #[must_use]
 pub fn load() -> Detector {
     let device = Device::flex();
-    let record = ModuleRecord::from_bytes(WEIGHTS.to_vec().into())
+    let record = ModuleRecord::from_bytes(burn::tensor::Bytes::from_bytes_vec(WEIGHTS.to_vec()))
         .expect("embedded weights are a valid Burnpack record");
     embedded_config()
         .init(&device)

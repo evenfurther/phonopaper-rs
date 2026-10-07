@@ -93,7 +93,7 @@ enum Command {
         #[arg(long, default_value_t = 0.05)]
         min_lr_fraction: f64,
     },
-    /// Convert a training checkpoint into `model.bin` (on the CPU).
+    /// Convert a training checkpoint into `model.bpk` (on the CPU).
     ///
     /// Use this to recover a model when training was interrupted, or to pick
     /// a specific epoch.  Without `--epoch`, the epoch with the lowest mean
@@ -111,7 +111,7 @@ enum Command {
         /// Dataset directory.
         #[arg(short, long, default_value = "dataset")]
         dataset: PathBuf,
-        /// Artifact directory containing `model.json` and `model.bin`.
+        /// Artifact directory containing `model.json` and `model.bpk`.
         #[arg(short, long, default_value = "artifacts")]
         artifacts: PathBuf,
         /// Mini-batch size.
@@ -122,20 +122,20 @@ enum Command {
         #[arg(long, default_value = "valid")]
         split: String,
         /// Evaluate the checkpoint of this epoch instead of the exported
-        /// `model.bin`.
+        /// `model.bpk`.
         #[arg(long)]
         epoch: Option<usize>,
     },
     /// Run a trained detector on image files and print JSON results.
     Infer {
-        /// Artifact directory containing `model.json` and `model.bin`.
+        /// Artifact directory containing `model.json` and `model.bpk`.
         #[arg(short, long, default_value = "artifacts")]
         artifacts: PathBuf,
         /// Presence probability threshold.
         #[arg(long, default_value_t = 0.5)]
         threshold: f32,
         /// Use the checkpoint of this epoch instead of the exported
-        /// `model.bin`.
+        /// `model.bpk`.
         #[arg(long)]
         epoch: Option<usize>,
         /// Image files (any format supported by the `image` crate build).
@@ -195,7 +195,7 @@ fn run(cli: Cli) -> Result<(), String> {
             let metrics = eval::evaluate(&model, &dataset, split, batch_size, &device)?;
             match epoch {
                 Some(e) => println!("weights: checkpoint of epoch {e}"),
-                None => println!("weights: exported model.bin"),
+                None => println!("weights: exported model.bpk"),
             }
             println!("split: {split:?}");
             println!("{metrics}");
