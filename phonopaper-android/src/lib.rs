@@ -294,8 +294,9 @@ fn solve_8x8(a: &mut [[f64; 9]; 8]) -> Option<[f64; 8]> {
         for row in (col + 1)..8 {
             let factor = a[row][col] / a[col][col];
             if factor != 0.0 {
-                for k in col..9 {
-                    a[row][k] -= factor * a[col][k];
+                let pivot_row = a[col];
+                for (target, &pivot_value) in a[row][col..].iter_mut().zip(&pivot_row[col..]) {
+                    *target -= factor * pivot_value;
                 }
             }
         }

@@ -126,6 +126,7 @@ impl DetectorConfig {
     /// # Panics
     ///
     /// Panics if `input_size` is not a positive multiple of 32.
+    #[must_use]
     pub fn init(&self, device: &Device) -> Detector {
         assert!(
             self.input_size > 0 && self.input_size.is_multiple_of(32),
@@ -176,6 +177,7 @@ impl Detector {
     ///
     /// `images` has shape `[batch, 1, input_size, input_size]` with values in
     /// `[0, 1]`.  Returns `[batch, 9]` (see the module documentation).
+    #[must_use]
     pub fn forward(&self, images: Tensor<4>) -> Tensor<2> {
         let mut x = images;
         let mut fine = None;
@@ -207,6 +209,7 @@ impl Detector {
     ///
     /// Useful for visualisation and debugging; [`Detector::forward`] applies
     /// the soft-argmax for you.
+    #[must_use]
     pub fn heatmaps(&self, fine: Tensor<4>, coarse: Tensor<4>) -> Tensor<4> {
         let [_, _, h, w] = fine.dims();
         let upsampled = interpolate(
@@ -227,6 +230,7 @@ impl Detector {
     /// # Panics
     ///
     /// Panics if `pixels.len() != input_size²`.
+    #[must_use]
     pub fn detect(&self, pixels: &[u8], device: &Device) -> Detection {
         let n = self.input_size;
         assert_eq!(pixels.len(), n * n, "expected {n}×{n} pixels");
@@ -249,6 +253,7 @@ pub fn image_tensor(pixels: &[u8], size: usize, device: &Device) -> Tensor<3> {
 /// Each heat-map is soft-maxed over its `h·w` cells and the coordinate is the
 /// probability-weighted mean of the cell centres, laid out on a grid spanning
 /// `[GRID_MIN, GRID_MAX]` in both directions.
+#[must_use]
 pub fn soft_argmax(heatmaps: Tensor<4>) -> Tensor<2> {
     let [batch, corners, h, w] = heatmaps.dims();
     let device = heatmaps.device();
