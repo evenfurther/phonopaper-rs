@@ -18,7 +18,34 @@ The end-to-end workflow is:
 3. [evaluate / try it](#3-evaluate-and-try-the-model);
 4. [transfer the model to `phonopaper-rs`](#4-transfer-the-model-to-phonopaper-rs).
 
-All commands below are run from this directory (`phonopaper-ml/`).
+All commands below are run from this directory (`phonopaper-ml/`). For the
+complete local workflow, use the checked automation rather than transcribing
+individual commands:
+
+```bash
+# Generates dataset-v2-scale3-50k only when needed, trains, then evaluates
+# both validation and training splits. Defaults to the portable CPU backend.
+./scripts/train-and-eval.sh
+
+# Typical GPU run and environment overrides:
+BACKEND=wgpu DATASET_COUNT=200000 BATCH_SIZE=16 EPOCHS=50 \
+    ARTIFACTS=artifacts-v2 ./scripts/train-and-eval.sh
+
+# After reviewing metrics, safely stage and test all three embedded artifacts:
+ARTIFACTS=artifacts-v2 ./scripts/embed-model.sh
+```
+
+Every script uses Bash strict mode, resolves repository paths relative to its
+own location, and accepts only non-secret environment configuration. The
+shared dataset check reuses a dataset only when `manifest.json` says format
+version 2 with the requested `SOURCE_SCALE` (default 3) and `labels.csv` is
+present. A missing, malformed, v1, or differently scaled dataset is removed
+and deterministically rebuilt instead of being silently reused.
+
+> **Current embedded-model status:** the checked-in application model is
+> **not loadable with the current stride-2 heat-map architecture** until a new
+> model is trained and embedded with `scripts/embed-model.sh`. Do not ship or
+> run the Android detector from this worktree before completing that step.
 
 ---
 
@@ -35,12 +62,14 @@ cargo run --release -p phonopaper-dataset -- --output dataset --count 4000
 | `--size <PX>` | `128` | Side of the square images; must be a multiple of 32 for the default network |
 | `--seed <U64>` | `1592590337` | Master seed |
 | `--positive-ratio <P>` | `0.6` | Probability that an image contains a pattern |
+| `--source-scale <N>` | `3` | Integer scale of the synthetic camera frame before production `Triangle` resizing; must be at least 2 |
 
 The output directory contains:
 
 * `000000.png`, `000001.png`, … — 8-bit grayscale PNGs;
 * `labels.csv` — one row per image (see below);
-* `manifest.json` — the generator parameters, corner convention and counts.
+* `manifest.json` — format version, generator parameters, exact preprocessing,
+  curriculum policy, corner convention and counts.
 
 ### Determinism
 
@@ -57,7 +86,13 @@ by `cargo test -p phonopaper-dataset`.
 
 **Positive samples** (`present = 1`) contain one genuine `PhonoPaper` sheet
 rendered by `phonopaper_rs::render::spectrogram_to_image_buf` — the same code
-the encoder uses — with:
+the encoder uses. The deterministic positive curriculum assigns 20% to clean,
+high-contrast localization scenes, 20% to deliberate narrow-margin/frame-filling
+scenes, and 60% to the existing varied photo-like path. Each complete scene is
+rendered at `--source-scale` times the stored dimensions and then resized with
+`image::FilterType::Triangle`, exactly matching production preprocessing;
+labels are divided by the same scale into final network-sized pixel coordinates
+without clipping, so out-of-frame corners remain valid. The varied path retains:
 
 * random marker geometry within the ranges accepted by
   `phonopaper_rs::decode::detect_markers` (thin/thick/gap/margin,
@@ -226,37 +261,47 @@ SafeTensors as described in the [Burn 0.22 migration guide](https://burn.dev/boo
 
 ### The network
 
-`phonopaper-train/src/model.rs` — a small CNN of ≈ 280 k parameters with two
-heads:
+`phonopaper-train/src/model.rs` defines a compact CNN with two heads:
 
 ```text
-input     [1 × 128 × 128]  (grayscale, values in [0, 1])
-trunk     5 × ( conv 3×3 → BatchNorm → ReLU → maxpool 2 )   channels 16, 32, 64, 128, 128
-presence  global average pool of the last stage (128) → Linear → 1 logit
-corners   stage 2 (32 × 32 × 32, stride 4) ⊕ stage 3 (64 × 16 × 16) upsampled ×2
-          → conv 3×3 → BatchNorm → ReLU → conv 1×1 → 4 heat-maps (32 × 32) → soft-argmax
+input     [1 × 128 × 128] (grayscale, values in [0, 1])
+trunk     5 × (conv 3×3 → BatchNorm → ReLU → maxpool 2)
+          channels 16, 32, 64, 128, 128
+presence  global average pool of final stride-32 stage → Linear(128 → 1 logit)
+corners   stride-2 stage 0 (16 × 64 × 64)
+          ⊕ stage 1 (32 × 32 × 32) nearest-upsampled ×2
+          ⊕ stage 2 (64 × 16 × 16) nearest-upsampled ×4
+          → conv 3×3 (64 channels) → BatchNorm → ReLU → conv 1×1
+          → 4 heat-maps (64 × 64) → soft-argmax
 ```
 
-Corners are localised with **heat-maps + soft-argmax** rather than a fully
-connected regression: the coordinate of each corner is the softmax-weighted
-mean of the heat-map cell centres, which keeps the spatial information of
-the feature map and is continuous (sub-cell precision).  The heat-map input
-merges a fine stage (stride 4, sharp edges) with a coarser one (stride 8,
-context), U-Net style.  A fully connected head was tried first and plateaued
-at ≈ 13 px mean error on 128 px inputs, identically on the training and
-validation splits — a capacity limit, not over-fitting; stride-8 heat-maps
-brought that to 6.4 px.  The soft-argmax grid spans `[-0.1, 1.1]` so corners
-slightly outside the frame remain representable.
+Corners are localised with **heat-maps + soft-argmax**, not a fully connected
+regressor. Each coordinate is the probability-weighted mean of one heat-map,
+so it remains continuous while preserving fine spatial evidence. The U-Net-like
+fusion combines stride-2 edges with stride-4 and stride-8 context. Its
+64×64 maps consume substantially more training activation memory than the old
+stride-4 head, so automation deliberately defaults to batches of 16 locally,
+32 on A40, and 64 on the larger cluster GPUs. Increase these only after
+measuring peak memory. The coordinate grid spans `[-0.1, 1.1]`, preserving
+labels for corners just outside the frame.
 
-Output row layout: `[presence logit, x0, y0, x1, y1, x2, y2, x3, y3]` with
-corners normalised by the input side (`0` = left/top edge, `1` = right/bottom
-edge; values slightly outside `[0, 1]` are legitimate).
+Output rows are `[presence logit, x0, y0, x1, y1, x2, y2, x3, y3]`; corner
+coordinates are divided by the input side, and may legitimately fall outside
+`[0, 1]`.
 
-Loss = binary cross-entropy on the presence logit + 20 × smooth-L1 on the
-corners, the latter averaged over positive samples only.  The smooth-L1
-transition δ is **0.01** (≈ 1.3 px): below δ the loss turns quadratic and
-its gradient fades, so δ is effectively the precision the network stops
-caring about — with δ = 0.05 the mean error plateaued at exactly 6.4 px.
+The objective is:
+
+```text
+presence BCE
++ 1 × normalized-Gaussian heat-map cross-entropy
++ 20 × smooth-L1 decoded-coordinate loss
+```
+
+Spatial terms are averaged over positive samples only and take the minimum of
+the labelled ordering and its 180°-rotated equivalent. Heat-map targets use
+σ = 0.02 in normalized coordinates (2.56 px at 128 px). Smooth-L1 uses
+δ = 0.01 (≈1.3 px), retaining useful localization gradients below the older
+δ = 0.05 plateau. An all-negative batch contributes finite zero spatial loss.
 
 The learning rate follows a **cosine decay** from `--learning-rate` to
 `--learning-rate × --min-lr-fraction` (default 0.05) over `--epochs`; the
@@ -277,31 +322,52 @@ edges carry the marker bands (`c0→c1` and `c2→c3`); which of them is the
 high-frequency end must come from elsewhere (the phone's orientation, or
 decoding both ways and keeping the one that sounds right).
 
-### Batch job on a Slurm cluster
+### Batch jobs on a Slurm cluster
+
+Generate the dataset independently on the CPU partition with:
+
+```bash
+cd phonopaper-ml
+sbatch slurm/generate-dataset.sbatch
+# Override the output and size when needed:
+DATASET=dataset-v2-scale3-300k DATASET_COUNT=300000 \
+    sbatch slurm/generate-dataset.sbatch
+```
+
+The generator already parallelizes images with Rayon. Each image has an
+independent RNG stream derived from `(seed, index)`, so thread scheduling does
+not affect the bytes written. The job sets `RAYON_NUM_THREADS` to the allocated
+`SLURM_CPUS_PER_TASK` (32 by default). Override `--partition` at submission time
+if the cluster's CPU partition has a different name.
 
 `slurm/train-a40.sbatch`, `slurm/train-h100.sbatch` and
 `slurm/train-rtx6000pro.sbatch` do steps 1–3 unattended on one GPU: build,
 generate the dataset if missing, train with early stopping, export the best
-epoch and evaluate it on both splits.  They only differ in resource
-directives and default backend / batch size / learning rate / worker count;
-the shared job body is `slurm/lib/train-and-eval.sh`.
+epoch and evaluate it on both splits. They only differ in resource directives
+and default backend / batch size / learning rate / worker count; the shared job
+body is `slurm/lib/train-and-eval.sh`. Submit the CPU generation job first when
+you do not want dataset generation to consume GPU allocation time.
 
 ```bash
 cd phonopaper-ml
-sbatch slurm/train-a40.sbatch                 # A40, CUDA:          batch 256, lr 2e-3,  8 workers
-sbatch slurm/train-h100.sbatch                # H100, CUDA:         batch 512, lr 3e-3, 16 workers
-sbatch slurm/train-rtx6000pro.sbatch          # RTX 6000 Pro, wgpu: batch 512, lr 3e-3, 16 workers
+sbatch slurm/train-a40.sbatch                 # A40, CUDA:          batch 32, lr 1e-3,  8 workers
+sbatch slurm/train-h100.sbatch                # H100, CUDA:         batch 64, lr 1e-3, 16 workers
+sbatch slurm/train-rtx6000pro.sbatch          # RTX 6000 Pro, wgpu: batch 64, lr 1e-3, 16 workers
 # tunables are environment variables:
-DATASET=dataset-200k EPOCHS=60 BATCH_SIZE=512 LEARNING_RATE=3e-3 sbatch slurm/train-a40.sbatch
+DATASET=dataset-v2-scale3-200k EPOCHS=60 BATCH_SIZE=48 sbatch slurm/train-a40.sbatch
 # other partition / GPU with the A40 defaults:
 sbatch --partition=V100-32GB slurm/train-a40.sbatch
 ```
 
-Variables: `REPO`, `DATASET`, `DATASET_COUNT`, `ARTIFACTS` (default
-`artifacts-<jobid>`), `EPOCHS`, `BATCH_SIZE`, `LEARNING_RATE`, `PATIENCE`,
-`WORKERS`, `SEED`, `BACKEND` (`cuda` or `wgpu`), `CUDA_MODULE`,
-`CARGO_TARGET_DIR`.  Output lands in `phonopaper-train-<jobid>.out` in the
-submission directory; the trained model is `<ARTIFACTS>/model.bpk`.
+Variables: `REPO`, `DATASET` (default `dataset-v2-scale3-200k`),
+`DATASET_COUNT`, `SOURCE_SCALE`, `IMAGE_SIZE`, `POSITIVE_RATIO`,
+`DATASET_SEED`, `ARTIFACTS` (default `artifacts-<jobid>`), `EPOCHS`,
+`BATCH_SIZE`, `LEARNING_RATE`, `PATIENCE`, `WORKERS`, `SEED`, `BACKEND`
+(`cuda` or `wgpu`), `CUDA_MODULE`, `CARGO_TARGET_DIR`, and `PYTHON`. Before
+reuse, the shared script parses the manifest and requires format v2 plus the
+requested source scale; incompatible directories are rebuilt. Output lands in
+`phonopaper-train-<jobid>.out` in the submission directory; the trained model
+is `<ARTIFACTS>/model.bpk`.
 
 > The RTX 6000 Pro script uses the Vulkan `wgpu` backend, which needs only
 > the graphics driver.  With `BACKEND=cuda` on that (Blackwell) GPU the CUDA
@@ -323,14 +389,28 @@ cargo run --release -p phonopaper-train -- eval --dataset dataset --artifacts ar
 cargo run --release -p phonopaper-train -- eval --dataset dataset --artifacts artifacts --epoch 12
 ```
 
-prints, for the validation split (default) or the training split, presence
-accuracy / precision / recall, the mean corner error in pixels over true
-positives, the fraction of corners within 3 px and 6 px, and the same error
-**relative to the pattern's longest edge** (mean, and fractions within 2 %
-and 5 %) — a 6 px error means something different on a 30 px pattern than
-on a 120 px one.  Comparing the
-two splits tells **under-fitting** (both poor → train longer / stronger
-signal) from **over-fitting** (train good, valid poor → more data).
+prints, for the validation split (default) or the training split:
+
+* presence accuracy / precision / recall;
+* mean corner error, fractions within 3 px and 6 px, and corner-error p50,
+  p90, p95 and worst case, all over correctly detected positive images;
+* corner error **relative to the truth quadrilateral's longest edge** (mean,
+  and fractions within 2 % and 5 %) — a 6 px error means something different
+  on a 30 px pattern than on a 120 px one;
+* mean, p10 and worst-case **quadrilateral IoU**. This is exact polygon IoU for
+  convex predicted and truth quadrilaterals, computed by convex clipping;
+  degenerate, self-intersecting or non-convex predictions score zero;
+* signed bias and mean absolute error of width and height scale, where width is
+  the mean length of the two marker-band edges, height is the mean length of
+  the other two edges, and scale error is `predicted / truth - 1`. Positive
+  bias therefore exposes systematic expanded-box predictions even when corner
+  errors alone look tolerable.
+
+Corner correspondence uses whichever of the direct and 180-degree-equivalent
+sheet orderings has lower total corner error. IoU and dimensions describe the
+quadrilateral geometry and are unchanged by that equivalent reordering.
+Comparing the two splits tells **under-fitting** (both poor → train longer /
+stronger signal) from **over-fitting** (train good, valid poor → more data).
 `--epoch N` evaluates the checkpoint of epoch `N` (it must still exist in
 `artifacts/checkpoint/`) instead of the exported `model.bpk`, so epochs can
 be compared without re-exporting.
@@ -345,6 +425,16 @@ prints one JSON object per image with `probability`, `present` (threshold
 image is converted to grayscale and stretched (aspect ratio not preserved) to
 the network input size; the normalised corners are mapped back by multiplying
 with the original width and height.
+
+For a repeatable fixture set, the wrapper writes JSON Lines and can compare it
+byte-for-byte with a reviewed baseline:
+
+```bash
+ARTIFACTS=artifacts-v2 OUTPUT=results.jsonl \
+    ./scripts/regression-infer.sh fixtures/positive.png fixtures/negative.png
+ARTIFACTS=artifacts-v2 EXPECTED=baselines/results.jsonl \
+    ./scripts/regression-infer.sh fixtures/positive.png fixtures/negative.png
+```
 
 > `infer` only understands PNG out of the box; enable more `image` codecs in
 > `phonopaper-train/Cargo.toml` if needed.
@@ -372,26 +462,25 @@ it (`phonopaper_android::rectify_pattern`).  The pieces in the library are:
 
 ### 4.1 Refresh the embedded model
 
-After a new training run:
+After reviewing a completed training run, use the safe transfer script:
 
 ```bash
-cp artifacts/model.bpk  ../phonopaper-rs/src/decode/nn/model.bpk
-cp artifacts/model.json ../phonopaper-rs/src/decode/nn/model.json
-# only if the architecture changed:
-cp phonopaper-train/src/model.rs ../phonopaper-rs/src/decode/nn/model.rs
+ARTIFACTS=artifacts-v2 ./scripts/embed-model.sh
 ```
 
-burn's recorders match weights **by field name**, so `model.rs` must be
-identical in both crates and the weights must have been exported from that
-very definition, or `load()` panics at start-up. Burnpack records validate
-parameter names and shapes when loading.
-`phonopaper-train/tests/embedded.rs` guards against both mistakes — it
-compares the two `model.rs` byte for byte and checks that the embedded
-`model.bpk` loads with exactly the parameter shapes of `model.json`:
+It requires non-empty `model.bpk` and `model.json`, stages those files together
+with the current `phonopaper-train/src/model.rs`, installs all three, and runs
+`cargo test -p phonopaper-train --test embedded`. If validation fails or the
+script is interrupted, it restores the previous embedded files. This avoids a
+partially copied or architecture-mismatched model.
 
-```bash
-cargo test -p phonopaper-train --test embedded
-```
+Burn's recorders match weights **by field name**, so `model.rs` must be
+identical in both crates and the weights must come from that exact definition,
+or `load()` fails at start-up. The embedded test compares `model.rs` byte for
+byte and loads `model.bpk` against the parameter shapes in `model.json`.
+
+> The current checked-in weights predate the stride-2 head and are not loadable.
+> A newly trained model must pass this script before the app detector is usable.
 
 Then, from the repository root:
 

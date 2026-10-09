@@ -24,11 +24,12 @@ use std::path::Path;
 
 use rayon::prelude::*;
 
-use labels::{Label, Manifest, labels_to_csv};
-pub use sample::{GeneratorConfig, Sample, generate_sample};
+use labels::{CurriculumInfo, Label, Manifest, PreprocessingInfo, labels_to_csv};
+use sample::{CLEAN_LOCALIZATION_SHARE, FRAME_FILLING_SHARE};
+pub use sample::{GeneratorConfig, PositiveKind, Sample, generate_sample};
 
 /// Current `manifest.json` / `labels.csv` format version.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// File name of the `index`-th image.
 #[must_use]
@@ -72,8 +73,26 @@ pub fn generate_dataset(cfg: &GeneratorConfig, out_dir: &Path) -> Result<Manifes
         config: cfg.clone(),
         corner_order: "top-left, top-right, bottom-right, bottom-left of the pattern \
                        (pattern orientation: the top marker band lies between x0y0 and x1y1); \
-                       pixel coordinates with pixel centres at +0.5"
+                       final stored-image pixel coordinates with pixel centres at +0.5; \
+                       coordinates may lie outside the frame"
             .to_owned(),
+        preprocessing: PreprocessingInfo {
+            source: format!(
+                "complete synthetic camera frame rendered at {}x the stored dimensions",
+                cfg.source_scale
+            ),
+            resize: "image::DynamicImage::resize_exact with FilterType::Triangle, matching production prepare_image"
+                .to_owned(),
+            label_space: "source-frame corners divided by source_scale; no clipping or quantization"
+                .to_owned(),
+        },
+        curriculum: CurriculumInfo {
+            clean_localization_share: CLEAN_LOCALIZATION_SHARE,
+            frame_filling_share: FRAME_FILLING_SHARE,
+            varied_photo_share: 1.0 - CLEAN_LOCALIZATION_SHARE - FRAME_FILLING_SHARE,
+            selection: "for each positive, the next per-item RNG draw selects clean [0,0.20), frame-filling [0.20,0.40), or varied [0.40,1.0)"
+                .to_owned(),
+        },
         positives,
         negatives: cfg.count - positives,
     };

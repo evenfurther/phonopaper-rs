@@ -6,7 +6,7 @@
 #
 # Tunables are environment variables (see slurm/lib/train-and-eval.sh), e.g.:
 #
-#   DATASET=dataset-200k EPOCHS=60 BATCH_SIZE=1024 LEARNING_RATE=4e-3 \
+#   DATASET=dataset-v2-scale3-200k EPOCHS=60 BATCH_SIZE=64 LEARNING_RATE=1e-3 \
 #       sbatch slurm/train-h100.sbatch
 #
 # Logs go to <jobname>-<jobid>.out / .err in the directory you submit from.
@@ -24,12 +24,11 @@
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
 
-# Partition-specific defaults: 80 GB of GPU memory and 64-core nodes allow a
-# larger batch (with the learning rate scaled by roughly its square root) and
-# more data-loader workers.
+# Conservative defaults for the stride-2 (64×64) heat-map head; the H100 can
+# start somewhat larger, but peak memory must be measured before increasing it.
 export BACKEND="${BACKEND:-cuda}"
-export BATCH_SIZE="${BATCH_SIZE:-512}"
-export LEARNING_RATE="${LEARNING_RATE:-3e-3}"
+export BATCH_SIZE="${BATCH_SIZE:-64}"
+export LEARNING_RATE="${LEARNING_RATE:-1e-3}"
 export WORKERS="${WORKERS:-16}"
 
 REPO="${REPO:-$HOME/Dev/phonopaper-rs}"

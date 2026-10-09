@@ -47,6 +47,31 @@ impl DataBounds {
     }
 }
 
+/// Marker geometry measured in one image column.
+///
+/// Unlike [`DataBounds`], `outer_top` and `outer_bottom` delimit the complete
+/// black marker ink box. `outer_bottom` and the thick-stripe ends are
+/// exclusive pixel rows. This richer geometry is useful for refining a
+/// coarse sheet quadrilateral without accidentally targeting the inner audio
+/// data bounds.
+#[derive(Debug, Clone, Copy)]
+pub struct MarkerColumnGeometry {
+    /// Complete audio-data bounds in this column.
+    pub data: DataBounds,
+    /// First row containing the outermost top marker stripe.
+    pub outer_top: u32,
+    /// Row after the outermost bottom marker stripe.
+    pub outer_bottom: u32,
+    /// First row of the top band's thick stripe.
+    pub top_thick_start: u32,
+    /// Row after the top band's thick stripe.
+    pub top_thick_end: u32,
+    /// First row of the bottom band's thick stripe.
+    pub bottom_thick_start: u32,
+    /// Row after the bottom band's thick stripe.
+    pub bottom_thick_end: u32,
+}
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 // Threshold: a pixel is "dark" if its luminance is below this value.
@@ -61,6 +86,8 @@ enum MarkerSide {
 #[derive(Debug, Clone, Copy)]
 struct MarkerCandidate {
     data_edge: u32,
+    outer_edge: u32,
+    thick_start: u32,
     thick_len: u32,
     thin_ref: u32,
     gap_ref: u32,
@@ -132,6 +159,8 @@ fn matches_top_marker_pattern(runs: &[(bool, u32, u32)], idx: usize) -> Option<M
     let inner_dark = runs[idx + 2];
     Some(MarkerCandidate {
         data_edge: inner_dark.1 + inner_dark.2,
+        outer_edge: runs[idx - 4].1,
+        thick_start: runs[idx].1,
         thick_len: thick,
         thin_ref,
         gap_ref: max_gap,
@@ -175,6 +204,8 @@ fn matches_bottom_marker_pattern(runs: &[(bool, u32, u32)], idx: usize) -> Optio
 
     Some(MarkerCandidate {
         data_edge: runs[idx - 2].1,
+        outer_edge: runs[idx + 4].1 + runs[idx + 4].2,
+        thick_start: runs[idx].1,
         thick_len: thick,
         thin_ref,
         gap_ref: max_gap,
@@ -282,25 +313,21 @@ fn detect_markers_in_column_cluster(image: &DynamicImage, sample_xs: &[u32]) -> 
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-/// Scan a specific vertical column of the image to locate the `PhonoPaper`
-/// marker bands.
+/// Scan a specific vertical column for the complete `PhonoPaper` marker
+/// geometry.
 ///
-/// This is the column-parametric version of [`detect_markers`]; it scans
-/// column `col_x` instead of the image centre column.  Use this when
-/// processing a perspective-distorted image where the marker bands are not
-/// perfectly horizontal: call this function for a set of evenly-spaced
-/// columns and interpolate `data_top` / `data_bottom` per column to
-/// compensate for keystone distortion, paper curl, and tilt without requiring
-/// an explicit de-warp step.
-///
-/// See [`detect_markers`] for a description of the algorithm and the marker
-/// band layout.
+/// The result includes both the inner [`DataBounds`] and the outer marker ink
+/// edges. It is intended for geometry/refinement code that must preserve the
+/// semantic distinction between those two rectangles.
 ///
 /// # Errors
 ///
-/// Returns [`PhonoPaperError::MarkerNotFound`] if no valid marker pattern is
+/// Returns [`PhonoPaperError::MarkerNotFound`] if no valid marker topology is
 /// detected in column `col_x`, or if `col_x` is out of bounds for the image.
-pub fn detect_markers_at_column(image: &DynamicImage, col_x: u32) -> Result<DataBounds> {
+pub fn detect_marker_geometry_at_column(
+    image: &DynamicImage,
+    col_x: u32,
+) -> Result<MarkerColumnGeometry> {
     let (width, height) = image.dimensions();
 
     if col_x >= width {
@@ -375,10 +402,33 @@ pub fn detect_markers_at_column(image: &DynamicImage, col_x: u32) -> Result<Data
         ));
     }
 
-    Ok(DataBounds {
-        data_top,
-        data_bottom,
+    Ok(MarkerColumnGeometry {
+        data: DataBounds {
+            data_top,
+            data_bottom,
+        },
+        outer_top: top_marker.outer_edge,
+        outer_bottom: bottom_marker.outer_edge,
+        top_thick_start: top_marker.thick_start,
+        top_thick_end: top_marker.thick_start + top_marker.thick_len,
+        bottom_thick_start: bottom_marker.thick_start,
+        bottom_thick_end: bottom_marker.thick_start + bottom_marker.thick_len,
     })
+}
+
+/// Scan a specific vertical column of the image to locate the `PhonoPaper`
+/// marker bands.
+///
+/// This is the column-parametric version of [`detect_markers`]; it returns
+/// the inner audio [`DataBounds`]. Geometry users that need the outer ink box
+/// should call [`detect_marker_geometry_at_column`] instead.
+///
+/// # Errors
+///
+/// Returns [`PhonoPaperError::MarkerNotFound`] if no valid marker pattern is
+/// detected in column `col_x`, or if `col_x` is out of bounds for the image.
+pub fn detect_markers_at_column(image: &DynamicImage, col_x: u32) -> Result<DataBounds> {
+    detect_marker_geometry_at_column(image, col_x).map(|geometry| geometry.data)
 }
 
 /// Scan multiple evenly-spaced columns of the image to locate the `PhonoPaper`

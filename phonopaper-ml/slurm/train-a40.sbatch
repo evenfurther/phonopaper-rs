@@ -6,7 +6,7 @@
 #
 # Tunables are environment variables (see slurm/lib/train-and-eval.sh), e.g.:
 #
-#   DATASET=dataset-200k EPOCHS=60 BATCH_SIZE=512 LEARNING_RATE=3e-3 \
+#   DATASET=dataset-v2-scale3-200k EPOCHS=60 BATCH_SIZE=32 LEARNING_RATE=1e-3 \
 #       sbatch slurm/train-a40.sbatch
 #
 # Logs go to <jobname>-<jobid>.out / .err in the directory you submit from.
@@ -20,9 +20,10 @@
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
 
-# Partition-specific defaults (48 GB GPU, 32-core nodes).
-export BATCH_SIZE="${BATCH_SIZE:-256}"
-export LEARNING_RATE="${LEARNING_RATE:-2e-3}"
+# Conservative defaults for the stride-2 (64×64) heat-map head. Increase only
+# after checking peak memory for this backend and GPU.
+export BATCH_SIZE="${BATCH_SIZE:-32}"
+export LEARNING_RATE="${LEARNING_RATE:-1e-3}"
 
 REPO="${REPO:-$HOME/Dev/phonopaper-rs}"
 # shellcheck disable=SC1091

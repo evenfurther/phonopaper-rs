@@ -12,7 +12,8 @@
 //!
 //! | Submodule | Contents |
 //! |-----------|---------|
-//! | [`markers`] | [`DataBounds`] and [`detect_markers`] |
+//! | [`markers`] | [`DataBounds`], [`MarkerColumnGeometry`], and marker detection |
+//! | [`refine`]  | Conservative upright outer-corner refinement |
 //! | [`image`]   | [`image_to_spectrogram`], [`column_amplitudes_from_image`], [`column_amplitudes_from_image_into`] |
 //! | [`synth`]   | [`AmplitudeMode`], [`SynthesisOptions`], [`Synthesizer`], [`spectrogram_to_audio`] |
 //! | [`wav`]     | [`decode_image_to_wav`], [`decode_image_to_wav_sps`], [`write_wav`] |
@@ -22,6 +23,7 @@ pub mod image;
 pub mod markers;
 #[cfg(feature = "nn-detector")]
 pub mod nn;
+pub mod refine;
 pub mod synth;
 pub mod wav;
 
@@ -31,6 +33,10 @@ pub use image::{
     column_amplitudes_from_image, column_amplitudes_from_image_into, fill_spectrogram_from_pixels,
     image_to_spectrogram, spectrogram_from_pixels,
 };
-pub use markers::{DataBounds, detect_markers, detect_markers_at_column};
+pub use markers::{
+    DataBounds, MarkerColumnGeometry, detect_marker_geometry_at_column, detect_markers,
+    detect_markers_at_column,
+};
+pub use refine::{CornerRefinement, refine_pattern_corners};
 pub use synth::{AmplitudeMode, SynthesisOptions, Synthesizer, spectrogram_to_audio};
 pub use wav::{decode_image_to_wav, decode_image_to_wav_sps, write_wav};

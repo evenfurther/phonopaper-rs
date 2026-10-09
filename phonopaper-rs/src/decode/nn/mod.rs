@@ -50,6 +50,8 @@ use burn::tensor::Device;
 use image::DynamicImage;
 use image::imageops::FilterType;
 
+use super::{CornerRefinement, refine_pattern_corners};
+
 pub use model::{
     Detection, Detector, DetectorConfig, OUTPUT_SIZE, decode_output, image_tensor, soft_argmax,
 };
@@ -202,5 +204,26 @@ impl PatternDetector {
         )]
         let corners = detection.corners_in_pixels(image.width() as f32, image.height() as f32);
         Some(corners)
+    }
+
+    /// Detect pixel corners and optionally refine upright detections with the
+    /// classical marker topology.
+    ///
+    /// The first tuple element always contains usable pixel corners whenever
+    /// the neural presence threshold is met. The second is `Some` only when
+    /// [`refine_pattern_corners`] found sufficiently strong support; otherwise
+    /// the first element safely remains the original neural prediction.
+    #[must_use]
+    pub fn find_corners_refined(
+        &self,
+        image: &DynamicImage,
+        threshold: f32,
+    ) -> Option<([[f32; 2]; 4], Option<CornerRefinement>)> {
+        let coarse = self.find_corners(image, threshold)?;
+        let refinement = refine_pattern_corners(image, coarse);
+        Some((
+            refinement.map_or(coarse, |refined| refined.corners),
+            refinement,
+        ))
     }
 }

@@ -24,13 +24,22 @@ set -euo pipefail
 
 REPO="${REPO:-$HOME/Dev/phonopaper-rs}"
 ML="$REPO/phonopaper-ml"
+SCRIPTS="$ML/scripts"
+# shellcheck source=../../scripts/lib.sh
+source "$SCRIPTS/lib.sh"
 
-DATASET="${DATASET:-dataset-200k}"        # relative to $ML unless absolute
-DATASET_COUNT="${DATASET_COUNT:-200000}"  # only used if the dataset is missing
-ARTIFACTS="${ARTIFACTS:-artifacts-$SLURM_JOB_ID}"
+DATASET="$(absolute_from_ml "${DATASET:-dataset-v2-scale3-200k}")"
+DATASET_COUNT="${DATASET_COUNT:-200000}"
+SOURCE_SCALE="${SOURCE_SCALE:-3}"
+IMAGE_SIZE="${IMAGE_SIZE:-128}"
+POSITIVE_RATIO="${POSITIVE_RATIO:-0.6}"
+DATASET_SEED="${DATASET_SEED:-1592590337}"
+ARTIFACTS="$(absolute_from_ml "${ARTIFACTS:-artifacts-${SLURM_JOB_ID:-local}}")"
 EPOCHS="${EPOCHS:-40}"
-BATCH_SIZE="${BATCH_SIZE:-256}"
-LEARNING_RATE="${LEARNING_RATE:-2e-3}"
+# The stride-2 corner head retains 64×64 activation maps; start conservatively
+# and raise this only after measuring memory on the selected backend/GPU.
+BATCH_SIZE="${BATCH_SIZE:-32}"
+LEARNING_RATE="${LEARNING_RATE:-1e-3}"
 PATIENCE="${PATIENCE:-6}"
 WORKERS="${WORKERS:-${SLURM_CPUS_PER_TASK:-8}}"
 SEED="${SEED:-42}"
@@ -58,8 +67,8 @@ esac
 
 cd "$ML"
 
-echo "== job $SLURM_JOB_ID on $(hostname), $(date)"
-echo "== backend=$BACKEND dataset=$DATASET artifacts=$ARTIFACTS epochs=$EPOCHS batch=$BATCH_SIZE lr=$LEARNING_RATE patience=$PATIENCE workers=$WORKERS"
+echo "== job ${SLURM_JOB_ID:-local} on $(hostname), $(date)"
+echo "== backend=$BACKEND dataset=$DATASET source_scale=$SOURCE_SCALE artifacts=$ARTIFACTS epochs=$EPOCHS batch=$BATCH_SIZE lr=$LEARNING_RATE patience=$PATIENCE workers=$WORKERS"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv || true
 
 # ─── 1. Build for this node's CPU ────────────────────────────────────────────
@@ -82,12 +91,10 @@ TRAIN=(cargo run -q --release -p phonopaper-train --no-default-features --featur
 cargo build --release -p phonopaper-dataset
 cargo build --release -p phonopaper-train --no-default-features --features "$BACKEND"
 
-# ─── 2. Dataset (generated only if missing) ──────────────────────────────────
+# ─── 2. Dataset (reuse only the current preprocessing contract) ─────────────
 
-if [ ! -f "$DATASET/manifest.json" ]; then
-    echo "== generating $DATASET ($DATASET_COUNT images)"
-    "${DATASET_BIN[@]}" --output "$DATASET" --count "$DATASET_COUNT"
-fi
+prepare_dataset "$DATASET" "$DATASET_COUNT" "$SOURCE_SCALE" "$IMAGE_SIZE" \
+    "$DATASET_SEED" "$POSITIVE_RATIO" "${DATASET_BIN[@]}"
 
 # ─── 3. Train (exports the best-validation epoch to $ARTIFACTS/model.bpk) ────
 
@@ -108,7 +115,7 @@ trap 'kill "$MONITOR" 2>/dev/null || true' EXIT
 "${TRAIN[@]}" train \
     --dataset "$DATASET" --artifacts "$ARTIFACTS" \
     --epochs "$EPOCHS" --batch-size "$BATCH_SIZE" --learning-rate "$LEARNING_RATE" \
-    --patience "$PATIENCE" --workers "$WORKERS" --seed "$SEED" \
+    --patience "$PATIENCE" --workers "$WORKERS" --seed "$SEED" --input-size "$IMAGE_SIZE" \
     | grep -vE 'TrainingProgress'
 
 echo "== mean validation loss per epoch"

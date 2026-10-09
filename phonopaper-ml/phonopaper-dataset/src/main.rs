@@ -25,6 +25,9 @@ struct Cli {
     /// Probability that an image contains a pattern.
     #[arg(long, default_value_t = GeneratorConfig::default().positive_ratio)]
     positive_ratio: f64,
+    /// Scale of the synthetic camera frame before production Triangle resizing.
+    #[arg(long, default_value_t = GeneratorConfig::default().source_scale)]
+    source_scale: u32,
 }
 
 fn main() -> ExitCode {
@@ -37,11 +40,16 @@ fn main() -> ExitCode {
         eprintln!("error: --positive-ratio must be in [0, 1]");
         return ExitCode::FAILURE;
     }
+    if cli.source_scale < 2 {
+        eprintln!("error: --source-scale must be at least 2");
+        return ExitCode::FAILURE;
+    }
     let cfg = GeneratorConfig {
         count: cli.count,
         size: cli.size,
         seed: cli.seed,
         positive_ratio: cli.positive_ratio,
+        source_scale: cli.source_scale,
     };
     match generate_dataset(&cfg, &cli.output) {
         Ok(manifest) => {

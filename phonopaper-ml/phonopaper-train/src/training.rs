@@ -8,7 +8,7 @@ use burn::lr_scheduler::cosine::CosineAnnealingLrSchedulerConfig;
 use burn::optim::AdamConfig;
 use burn::prelude::*;
 use burn::tensor::Device;
-use burn::tensor::activation::log_sigmoid;
+use burn::tensor::activation::{log_sigmoid, log_softmax};
 use burn::train::checkpoint::KeepLastNCheckpoints;
 use burn::train::metric::LossMetric;
 use burn::train::metric::store::{Aggregate, Direction, Split as MetricSplit};
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::data::{
     DetectionBatch, DetectionBatcher, HostBatch, Split, count_positives, load_split,
 };
-use crate::model::{Detector, DetectorConfig};
+use crate::model::{Detector, DetectorConfig, DetectorOutput, HEATMAP_GRID_MAX, HEATMAP_GRID_MIN};
 
 /// File name of the exported Burnpack model artifact.
 pub const CHECKPOINT_FILE: &str = "model.bpk";
@@ -37,7 +37,19 @@ pub const TRAIN_CONFIG_FILE: &str = "training.json";
 /// Corner errors are measured in normalised units (an error of `0.01` is
 /// about one pixel on a 128 px input), so they need a large weight to matter
 /// as much as the classification term.
-const CORNER_LOSS_WEIGHT: f64 = 20.0;
+pub const CORNER_LOSS_WEIGHT: f64 = 20.0;
+
+/// Weight of direct heat-map supervision relative to presence classification.
+///
+/// Unit-normalized Gaussian targets make this a cross-entropy in natural-log
+/// units, so one keeps it comparable to the presence binary cross-entropy.
+pub const HEATMAP_LOSS_WEIGHT: f64 = 1.0;
+
+/// Standard deviation of target Gaussians in normalized image coordinates.
+///
+/// At the default 128-pixel input this is 2.56 pixels, broad enough to provide
+/// gradients around a corner while still rewarding a sharply localized peak.
+pub const HEATMAP_SIGMA: f32 = 0.02;
 
 /// Transition point of the smooth-L1 (Huber) corner loss, in normalised units
 /// (`0.01` ≈ 1.3 px on a 128 px input).
@@ -45,7 +57,7 @@ const CORNER_LOSS_WEIGHT: f64 = 20.0;
 /// Below δ the loss is quadratic and its gradient fades, so δ is effectively
 /// the precision the network stops caring about: with δ = 0.05 the mean
 /// corner error plateaued at exactly 6.4 px = 0.05 × 128.
-const HUBER_DELTA: f64 = 0.01;
+pub const HUBER_DELTA: f64 = 0.01;
 
 /// Training hyper-parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,36 +101,104 @@ impl Default for TrainingConfig {
     }
 }
 
-/// Compute the training loss.
+/// Compute the training loss from one trunk pass.
 ///
-/// * presence: binary cross-entropy with logits, averaged over the batch;
-/// * corners: smooth-L1 between predicted and true normalised coordinates,
-///   averaged over the positive samples only (there is no meaningful corner
-///   target for negatives).
-///
-/// A `PhonoPaper` sheet is symmetric under a 180° rotation (the bottom
-/// marker band mirrors the top one), so the labelled order `TL, TR, BR, BL`
-/// and its rotation `BR, BL, TL, TR` describe the same picture.  The corner
-/// term is therefore the **minimum over both orderings**, which lets the
-/// network commit to one of them instead of averaging them.
-pub fn detection_loss(output: Tensor<2>, targets: Tensor<2>) -> Tensor<1> {
-    let logits = output.clone().narrow(1, 0, 1);
+/// The objective combines presence binary cross-entropy, direct normalized
+/// Gaussian heat-map cross-entropy, and smooth-L1 decoded-coordinate loss.
+/// Spatial terms are averaged over positive samples only. Both spatial terms
+/// take the minimum over direct corner order and a two-channel rotation, since
+/// a `PhonoPaper` sheet is indistinguishable after a 180° turn.
+#[must_use]
+pub fn detection_loss(prediction: DetectorOutput, targets: Tensor<2>) -> Tensor<1> {
+    let logits = prediction.output.clone().narrow(1, 0, 1);
     let present = targets.clone().narrow(1, 0, 1);
     let absent = present.clone().neg().add_scalar(1.0);
     let bce = (present.clone() * log_sigmoid(logits.clone()) + absent * log_sigmoid(logits.neg()))
         .neg()
         .mean();
 
-    let predicted = output.narrow(1, 1, 8);
-    let truth = targets.narrow(1, 1, 8);
+    let predicted = prediction.output.narrow(1, 1, 8);
+    let truth = targets.clone().narrow(1, 1, 8);
     let direct = corner_huber(predicted.clone(), truth.clone());
     let rotated = corner_huber(predicted, rotate_180(truth));
-    // Per-sample best ordering, then mask negatives.
-    let per_sample = direct.min_pair(rotated) * present.clone();
-    let positives = present.sum().clamp_min(1.0);
-    let corner = per_sample.sum() / positives;
+    let positives = present.clone().sum().clamp_min(1.0);
+    let corner = (direct.min_pair(rotated) * present.clone()).sum() / positives.clone();
+    let heatmap = heatmap_loss(prediction.heatmaps, targets);
 
-    bce + corner.mul_scalar(CORNER_LOSS_WEIGHT)
+    bce + corner.mul_scalar(CORNER_LOSS_WEIGHT) + heatmap.mul_scalar(HEATMAP_LOSS_WEIGHT)
+}
+
+/// Gaussian cross-entropy for raw `[batch, 4, h, w]` corner heat-map logits.
+///
+/// Target Gaussians are normalized independently per corner. Negative samples
+/// are masked, and an all-negative batch returns a finite zero heat-map loss.
+/// A two-channel rotation represents the equivalent 180° corner ordering.
+///
+/// # Panics
+///
+/// Panics unless `heatmaps` has exactly four corner channels, or if `targets`
+/// cannot be read as `f32` values.
+#[must_use]
+pub fn heatmap_loss(heatmaps: Tensor<4>, targets: Tensor<2>) -> Tensor<1> {
+    let [batch, corners, h, w] = heatmaps.dims();
+    assert_eq!(corners, 4, "expected four corner heat-map channels");
+    let device = heatmaps.device();
+    let target_values: Vec<f32> = targets
+        .clone()
+        .narrow(1, 1, 8)
+        .into_data()
+        .try_into_vec()
+        .expect("f32 corner targets");
+    let mut maps = vec![0.0_f32; batch * corners * h * w];
+    for sample in 0..batch {
+        for corner in 0..corners {
+            let x = target_values[sample * 8 + corner * 2];
+            let y = target_values[sample * 8 + corner * 2 + 1];
+            let offset = (sample * corners + corner) * h * w;
+            let mut sum = 0.0;
+            for row in 0..h {
+                for col in 0..w {
+                    #[expect(clippy::cast_precision_loss, reason = "heat-map dimensions are small")]
+                    let gx = HEATMAP_GRID_MIN
+                        + (HEATMAP_GRID_MAX - HEATMAP_GRID_MIN) * (col as f32 + 0.5) / w as f32;
+                    #[expect(clippy::cast_precision_loss, reason = "heat-map dimensions are small")]
+                    let gy = HEATMAP_GRID_MIN
+                        + (HEATMAP_GRID_MAX - HEATMAP_GRID_MIN) * (row as f32 + 0.5) / h as f32;
+                    let value = (-((gx - x).powi(2) + (gy - y).powi(2))
+                        / (2.0 * HEATMAP_SIGMA.powi(2)))
+                    .exp();
+                    maps[offset + row * w + col] = value;
+                    sum += value;
+                }
+            }
+            for value in &mut maps[offset..offset + h * w] {
+                *value /= sum;
+            }
+        }
+    }
+    let target_maps =
+        Tensor::<1>::from_floats(maps.as_slice(), &device).reshape([batch, corners, h * w]);
+    let log_probabilities = log_softmax(heatmaps.reshape([batch, corners, h * w]), 2);
+    let direct = (target_maps.clone() * log_probabilities.clone())
+        .sum_dim(2)
+        .mean_dim(1)
+        .neg()
+        .reshape([batch, 1]);
+    let rotated_target = Tensor::cat(
+        vec![
+            target_maps.clone().narrow(1, 2, 2),
+            target_maps.narrow(1, 0, 2),
+        ],
+        1,
+    );
+    let rotated = (rotated_target * log_probabilities)
+        .sum_dim(2)
+        .mean_dim(1)
+        .neg()
+        .reshape([batch, 1]);
+    let present = targets.narrow(1, 0, 1);
+    let positives = present.clone().sum().clamp_min(1.0);
+    (direct.min_pair(rotated) * present).sum() / positives
 }
 
 /// Per-sample mean smooth-L1 between two `[batch, 8]` corner tensors →
@@ -133,6 +213,7 @@ fn corner_huber(predicted: Tensor<2>, truth: Tensor<2>) -> Tensor<2> {
 
 /// Reorder `[batch, 8]` corners `TL, TR, BR, BL` into `BR, BL, TL, TR` — the
 /// same quadrilateral seen from a sheet turned by 180°.
+#[must_use]
 pub fn rotate_180(corners: Tensor<2>) -> Tensor<2> {
     let first_half = corners.clone().narrow(1, 0, 4);
     let second_half = corners.narrow(1, 4, 4);
@@ -141,9 +222,11 @@ pub fn rotate_180(corners: Tensor<2>) -> Tensor<2> {
 
 impl Detector {
     /// Forward pass plus loss, packaged for burn's metrics.
+    #[must_use]
     pub fn forward_regression(&self, batch: DetectionBatch) -> RegressionOutput {
-        let output = self.forward(batch.images);
-        let loss = detection_loss(output.clone(), batch.targets.clone());
+        let prediction = self.forward_with_heatmaps(batch.images);
+        let output = prediction.output.clone();
+        let loss = detection_loss(prediction, batch.targets.clone());
         RegressionOutput {
             loss,
             output,

@@ -80,8 +80,8 @@ static DETECTOR: LazyLock<PatternDetector> = LazyLock::new(PatternDetector::new)
 /// be recovered, or the spectrogram cannot be synthesized.
 pub fn decode_image_to_pcm(image_bytes: &[u8]) -> Result<Vec<i16>, String> {
     let image = image::load_from_memory(image_bytes).map_err(|err| err.to_string())?;
-    let spectrogram = match DETECTOR.find_corners(&image, DETECTION_THRESHOLD) {
-        Some(corners) if !is_axis_aligned(corners, image.width(), image.height()) => {
+    let spectrogram = match DETECTOR.find_corners_refined(&image, DETECTION_THRESHOLD) {
+        Some((corners, _)) if !is_axis_aligned(corners, image.width(), image.height()) => {
             let rectified = rectify_pattern(&image, corners);
             decode_spectrogram(&rectified).or_else(|_| decode_spectrogram(&image))?
         }
@@ -149,11 +149,15 @@ fn is_axis_aligned(corners: [[f32; 2]; 4], width: u32, height: u32) -> bool {
 /// the image is valid but the presence probability is below the threshold.
 pub fn detect_pattern_corners(image_bytes: &[u8]) -> Result<Option<[[f32; 2]; 4]>, String> {
     let image = image::load_from_memory(image_bytes).map_err(|err| err.to_string())?;
-    let detection = DETECTOR.detect(&image);
-    if detection.probability < DETECTION_THRESHOLD {
+    let Some((corners, _)) = DETECTOR.find_corners_refined(&image, DETECTION_THRESHOLD) else {
         return Ok(None);
-    }
-    Ok(Some(detection.corners))
+    };
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "image dimensions are far below 2^24"
+    )]
+    let (width, height) = (image.width() as f32, image.height() as f32);
+    Ok(Some(corners.map(|[x, y]| [x / width, y / height])))
 }
 
 /// Resample the quadrilateral `corners` (`[TL, TR, BR, BL]` in pixels of
