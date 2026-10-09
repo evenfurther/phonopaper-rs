@@ -3,6 +3,27 @@ apply plugin: 'com.android.application'
 def jniLibsDir = file("$projectDir/src/main/jniLibs")
 def rustManifest = file("${rootDir}/../phonopaper-android/Cargo.toml")
 def rustTargets = ['arm64-v8a', 'armeabi-v7a', 'x86_64']
+def releaseKeystorePath = System.getenv('ANDROID_KEYSTORE_PATH')
+def releaseKeystorePassword = System.getenv('ANDROID_KEYSTORE_PASSWORD')
+def releaseKeyAlias = System.getenv('ANDROID_KEY_ALIAS')
+def releaseKeyPassword = System.getenv('ANDROID_KEY_PASSWORD')
+def releaseSigningValues = [
+    releaseKeystorePath,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+]
+def releaseSigningConfigured = releaseSigningValues.every { it }
+
+if (releaseSigningValues.any { it } && !releaseSigningConfigured) {
+    throw new GradleException(
+        'ANDROID_KEYSTORE_PATH, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ' +
+            'and ANDROID_KEY_PASSWORD must all be set for release signing.'
+    )
+}
+
+def androidVersionCode = (System.getenv('ANDROID_VERSION_CODE') ?: '1') as int
+def androidVersionName = System.getenv('ANDROID_VERSION_NAME') ?: '0.1.0'
 
 def rustCommand = { releaseBuild ->
     def command = ['cargo', 'ndk']
@@ -20,12 +41,23 @@ android {
     namespace 'com.evenfurther.phonopaper'
     compileSdk 37
 
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            release {
+                storeFile file(releaseKeystorePath)
+                storePassword releaseKeystorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
     defaultConfig {
         applicationId 'com.evenfurther.phonopaper'
         minSdk 26
         targetSdk 37
-        versionCode 1
-        versionName '0.1.0'
+        versionCode androidVersionCode
+        versionName androidVersionName
     }
 
     buildTypes {
@@ -34,7 +66,7 @@ android {
         }
         release {
             minifyEnabled false
-            signingConfig signingConfigs.debug
+            signingConfig releaseSigningConfigured ? signingConfigs.release : signingConfigs.debug
         }
     }
 
