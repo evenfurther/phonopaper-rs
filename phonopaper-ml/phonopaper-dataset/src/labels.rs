@@ -137,6 +137,30 @@ pub fn read_labels(dir: &Path) -> Result<Vec<Label>, String> {
     labels_from_csv(&text)
 }
 
+/// Stored-image preprocessing represented by dataset generation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreprocessingInfo {
+    /// Description of the high-resolution source frame.
+    pub source: String,
+    /// Exact resize operation used to make the stored network input.
+    pub resize: String,
+    /// Coordinate space used by `labels.csv`.
+    pub label_space: String,
+}
+
+/// Deterministic positive-sample curriculum policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CurriculumInfo {
+    /// Share of positives using simple localization scenes.
+    pub clean_localization_share: f64,
+    /// Share of positives deliberately filling or clipping the frame.
+    pub frame_filling_share: f64,
+    /// Share retaining the varied photo-like generation path.
+    pub varied_photo_share: f64,
+    /// Human-readable deterministic selection rule.
+    pub selection: String,
+}
+
 /// Metadata written next to the images as `manifest.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Manifest {
@@ -146,6 +170,10 @@ pub struct Manifest {
     pub config: GeneratorConfig,
     /// Human-readable description of the corner convention.
     pub corner_order: String,
+    /// Rendering and resize preprocessing represented in stored samples.
+    pub preprocessing: PreprocessingInfo,
+    /// Positive-sample curriculum and deterministic selection policy.
+    pub curriculum: CurriculumInfo,
     /// Number of positive samples.
     pub positives: u64,
     /// Number of negative samples.

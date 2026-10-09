@@ -7,7 +7,10 @@
 //! [`phonopaper_rs::render::spectrogram_to_image`].
 
 use image::{DynamicImage, GenericImageView as _, GrayImage, Luma, RgbImage};
-use phonopaper_rs::decode::{DataBounds, detect_markers, detect_markers_at_column};
+use phonopaper_rs::decode::{
+    DataBounds, detect_marker_geometry_at_column, detect_markers, detect_markers_at_column,
+    refine_pattern_corners,
+};
 use phonopaper_rs::render::{RenderOptions, spectrogram_to_image};
 use phonopaper_rs::spectrogram::SpectrogramVec;
 
@@ -583,6 +586,57 @@ fn detect_markers_finds_embedded_pattern_amid_noise_columns() {
         detect_markers(&DynamicImage::ImageRgb8(composite)).expect("embedded pattern should win");
     assert_eq!(bounds.data_top, expected_top(&opts));
     assert_eq!(bounds.data_bottom, expected_bottom(&opts));
+}
+
+#[test]
+fn marker_geometry_reports_outer_ink_not_data_bounds() {
+    let (image, opts) = default_phonopaper_image();
+    let geometry =
+        detect_marker_geometry_at_column(&image, 1).expect("clean marker geometry should detect");
+
+    assert_eq!(geometry.outer_top, opts.margin);
+    assert_eq!(geometry.outer_bottom, image.height() - opts.margin);
+    assert_eq!(geometry.data.data_top, opts.marker_band_height());
+    assert_eq!(geometry.data.data_bottom, expected_bottom(&opts));
+    assert!(geometry.top_thick_start < geometry.top_thick_end);
+    assert!(geometry.bottom_thick_start < geometry.bottom_thick_end);
+}
+
+#[test]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "small test image dimensions are exactly representable as f32"
+)]
+fn refinement_recovers_clean_outer_ink_box() {
+    let opts = RenderOptions::default();
+    let pattern = spectrogram_to_image(&SpectrogramVec::new(24), &opts);
+    let image = DynamicImage::ImageRgb8(pattern);
+    let coarse = [[-2.0, 82.0], [25.0, 92.0], [25.0, 1002.0], [-2.0, 994.0]];
+
+    let refined = refine_pattern_corners(&image, coarse).expect("clean pattern should refine");
+    assert_eq!(
+        refined.corners,
+        [
+            [0.0, opts.margin as f32],
+            [24.0, opts.margin as f32],
+            [24.0, (image.height() - opts.margin) as f32],
+            [0.0, (image.height() - opts.margin) as f32],
+        ]
+    );
+    assert_eq!(refined.support_columns, 24);
+    assert!(refined.sampled_columns >= 24);
+    assert!(refined.confidence > 0.75);
+}
+
+#[test]
+fn refinement_returns_none_without_safe_support() {
+    let blank = DynamicImage::ImageLuma8(GrayImage::from_pixel(40, 80, Luma([255])));
+    let upright = [[5.0, 5.0], [35.0, 5.0], [35.0, 75.0], [5.0, 75.0]];
+    assert_eq!(refine_pattern_corners(&blank, upright), None);
+
+    let (pattern, _) = default_phonopaper_image();
+    let rotated = [[0.0, 0.0], [3.0, 2.0], [2.0, 1087.0], [-1.0, 1085.0]];
+    assert_eq!(refine_pattern_corners(&pattern, rotated), None);
 }
 
 /// The `Display` impl for `PhonoPaperError::MarkerNotFound` includes the

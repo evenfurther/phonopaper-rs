@@ -106,6 +106,16 @@ pub use spectrogram::{Spectrogram, SpectrogramBuf, SpectrogramBufMut, Spectrogra
 /// See that type for full documentation.
 pub use decode::Synthesizer;
 
+/// Result of conservative classical corner refinement.
+///
+/// This is a convenience re-export of [`decode::CornerRefinement`].
+pub use decode::CornerRefinement;
+
+/// Conservative classical refinement of an upright coarse quadrilateral.
+///
+/// This is a convenience re-export of [`decode::refine_pattern_corners`].
+pub use decode::refine_pattern_corners;
+
 /// Decode a `PhonoPaper` image file to a WAV audio file (353 samples/column).
 ///
 /// This is a convenience wrapper around [`decode::decode_image_to_wav`].

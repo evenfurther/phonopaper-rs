@@ -1,7 +1,7 @@
 //! End-to-end determinism of the dataset generator.
 
 use phonopaper_dataset::labels::{read_labels, read_manifest};
-use phonopaper_dataset::{GeneratorConfig, generate_dataset, image_file_name};
+use phonopaper_dataset::{FORMAT_VERSION, GeneratorConfig, generate_dataset, image_file_name};
 
 fn small_config() -> GeneratorConfig {
     GeneratorConfig {
@@ -9,6 +9,7 @@ fn small_config() -> GeneratorConfig {
         size: 48,
         seed: 99,
         positive_ratio: 0.6,
+        source_scale: 3,
     }
 }
 
@@ -47,6 +48,19 @@ fn labels_and_manifest_are_readable_and_consistent() {
     let labels = read_labels(dir.path()).unwrap();
     assert_eq!(labels.len(), usize::try_from(cfg.count).unwrap());
     assert_eq!(read_manifest(dir.path()).unwrap(), manifest);
+    assert_eq!(manifest.format_version, FORMAT_VERSION);
+    assert_eq!(FORMAT_VERSION, 2);
+    assert_eq!(manifest.curriculum.clean_localization_share, 0.20);
+    assert_eq!(manifest.curriculum.frame_filling_share, 0.20);
+    assert!((manifest.curriculum.varied_photo_share - 0.60).abs() < f64::EPSILON);
+    assert!(manifest.preprocessing.source.contains("3x"));
+    assert!(
+        manifest
+            .preprocessing
+            .resize
+            .contains("FilterType::Triangle")
+    );
+    assert!(manifest.preprocessing.label_space.contains("no clipping"));
     let positives = labels.iter().filter(|l| l.corners.is_some()).count() as u64;
     assert_eq!(positives, manifest.positives);
     for (idx, label) in labels.iter().enumerate() {

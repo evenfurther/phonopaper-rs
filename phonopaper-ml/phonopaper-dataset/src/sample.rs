@@ -4,7 +4,8 @@
 //! stream is derived from those two values only, so the dataset can be
 //! generated in any order or in parallel with identical results.
 
-use image::GrayImage;
+use image::imageops::FilterType;
+use image::{DynamicImage, GrayImage};
 use serde::{Deserialize, Serialize};
 
 use crate::background::random_background;
@@ -24,6 +25,11 @@ pub struct GeneratorConfig {
     pub seed: u64,
     /// Probability that an image contains a `PhonoPaper` pattern.
     pub positive_ratio: f64,
+    /// Integer scale of the synthetic camera frame relative to the stored image.
+    ///
+    /// The complete scene is rendered at `size * source_scale`, then resized
+    /// to `size` with the production `Triangle` filter.
+    pub source_scale: u32,
 }
 
 impl Default for GeneratorConfig {
@@ -33,8 +39,21 @@ impl Default for GeneratorConfig {
             size: 128,
             seed: 0x5EED_0001,
             positive_ratio: 0.6,
+            source_scale: 3,
         }
     }
+}
+
+/// Positive-sample curriculum category selected before scene generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PositiveKind {
+    /// Simple, high-contrast, nearly axis-aligned localization example.
+    CleanLocalization,
+    /// Pattern deliberately fills the frame with a narrow or clipped margin.
+    FrameFilling,
+    /// Existing varied, cluttered and photo-like generation path.
+    VariedPhoto,
 }
 
 /// A generated image and its ground truth.
@@ -46,7 +65,14 @@ pub struct Sample {
     /// orientation), in output pixel coordinates.  `None` when the image
     /// contains no pattern.
     pub corners: Option<Quad>,
+    /// Curriculum category for a positive sample.
+    pub positive_kind: Option<PositiveKind>,
 }
+
+/// Share of positive samples reserved for clean localization.
+pub const CLEAN_LOCALIZATION_SHARE: f64 = 0.20;
+/// Share of positive samples reserved for narrow-margin/frame-filling scenes.
+pub const FRAME_FILLING_SHARE: f64 = 0.20;
 
 /// Fraction of the image side by which a corner may lie outside the frame
 /// while the pattern is still considered present.
@@ -56,31 +82,70 @@ const OUTSIDE_TOLERANCE: f64 = 0.05;
 const SUPER_SAMPLES: usize = 2;
 
 /// Generate the sample with the given index.
+///
+/// # Panics
+///
+/// Panics if `source_scale` is less than two or the scaled dimensions overflow.
 #[must_use]
 pub fn generate_sample(cfg: &GeneratorConfig, index: u64) -> Sample {
+    assert!(
+        cfg.source_scale > 1,
+        "source_scale must be greater than one"
+    );
     let mut rng = Rng::for_item(cfg.seed, index);
-    let size = cfg.size as usize;
-    let mut canvas = random_background(&mut rng, size);
+    let source_side = cfg
+        .size
+        .checked_mul(cfg.source_scale)
+        .expect("source image dimensions fit u32");
+    let canvas_size = usize::try_from(source_side).expect("image size fits usize");
+    let is_positive = rng.chance(cfg.positive_ratio);
+    let positive_kind = is_positive.then(|| select_positive_kind(&mut rng));
+    let mut canvas = if positive_kind == Some(PositiveKind::CleanLocalization) {
+        Canvas::filled(canvas_size, canvas_size, 225.0)
+    } else {
+        random_background(&mut rng, canvas_size)
+    };
 
     let mut corners = None;
-    if rng.chance(cfg.positive_ratio) {
+    if let Some(kind) = positive_kind {
         let sheet = phonopaper_sheet(&mut rng);
-        corners = place_sheet(&mut rng, &mut canvas, &sheet);
+        corners = place_sheet(&mut rng, &mut canvas, &sheet, kind);
         // Placement fails only for pathological random draws; in that case the
         // image is (deterministically) a negative sample.
     } else if rng.chance(0.5) {
         let sheet = decoy_sheet(&mut rng);
-        let _ = place_sheet(&mut rng, &mut canvas, &sheet);
+        let _ = place_sheet(&mut rng, &mut canvas, &sheet, PositiveKind::VariedPhoto);
     }
 
-    if corners.is_some() && rng.chance(0.12) {
+    if positive_kind == Some(PositiveKind::VariedPhoto) && corners.is_some() && rng.chance(0.12) {
         add_occluder(&mut rng, &mut canvas);
     }
-    photometric_degradation(&mut rng, &mut canvas);
+    if positive_kind != Some(PositiveKind::CleanLocalization) {
+        photometric_degradation(&mut rng, &mut canvas);
+    }
 
+    let label_scale = 1.0 / f64::from(cfg.source_scale);
+    let corners =
+        corners.map(|quad| quad.map(|p| Point::new(p.x * label_scale, p.y * label_scale)));
+    let source = DynamicImage::ImageLuma8(canvas.to_image());
+    let image = source
+        .resize_exact(cfg.size, cfg.size, FilterType::Triangle)
+        .into_luma8();
     Sample {
-        image: canvas.to_image(),
+        image,
         corners,
+        positive_kind: corners.and(positive_kind),
+    }
+}
+
+fn select_positive_kind(rng: &mut Rng) -> PositiveKind {
+    let draw = rng.next_f64();
+    if draw < CLEAN_LOCALIZATION_SHARE {
+        PositiveKind::CleanLocalization
+    } else if draw < CLEAN_LOCALIZATION_SHARE + FRAME_FILLING_SHARE {
+        PositiveKind::FrameFilling
+    } else {
+        PositiveKind::VariedPhoto
     }
 }
 
@@ -126,7 +191,12 @@ fn random_rotation(rng: &mut Rng) -> (f64, f64) {
 /// Compute the destination quadrilateral of a sheet's ink box.
 ///
 /// Returns `None` if no placement fitting the tolerance could be found.
-fn random_target_quad(rng: &mut Rng, ink_box: &Quad, size: usize) -> Option<Quad> {
+fn random_target_quad(
+    rng: &mut Rng,
+    ink_box: &Quad,
+    size: usize,
+    kind: PositiveKind,
+) -> Option<Quad> {
     #[expect(clippy::cast_precision_loss, reason = "image size is a small integer")]
     let sf = size as f64;
     let ink_w = ink_box[1].x - ink_box[0].x;
@@ -134,9 +204,36 @@ fn random_target_quad(rng: &mut Rng, ink_box: &Quad, size: usize) -> Option<Quad
     let cx = f64::midpoint(ink_box[0].x, ink_box[2].x);
     let cy = f64::midpoint(ink_box[0].y, ink_box[2].y);
 
-    let (c, s) = random_rotation(rng);
-    let shear = rng.range_f64(-0.25, 0.25);
-    let mut longest = sf * rng.range_f64(0.25, 0.95);
+    let (c, s, shear, mut longest) = match kind {
+        PositiveKind::CleanLocalization => {
+            let t = rng.range_f64(-0.08, 0.08);
+            let n = (1.0 + t * t).sqrt();
+            (
+                1.0 / n,
+                t / n,
+                rng.range_f64(-0.03, 0.03),
+                sf * rng.range_f64(0.55, 0.75),
+            )
+        }
+        PositiveKind::FrameFilling => {
+            let (c, s) = random_rotation(rng);
+            (
+                c,
+                s,
+                rng.range_f64(-0.15, 0.15),
+                sf * rng.range_f64(0.90, 1.05),
+            )
+        }
+        PositiveKind::VariedPhoto => {
+            let (c, s) = random_rotation(rng);
+            (
+                c,
+                s,
+                rng.range_f64(-0.25, 0.25),
+                sf * rng.range_f64(0.25, 0.95),
+            )
+        }
+    };
     let lo = -OUTSIDE_TOLERANCE * sf;
     let hi = (1.0 + OUTSIDE_TOLERANCE) * sf;
 
@@ -168,7 +265,12 @@ fn random_target_quad(rng: &mut Rng, ink_box: &Quad, size: usize) -> Option<Quad
                 Point::new(mapped[3].x + tx, mapped[3].y + ty),
             ];
             // Perspective: jitter each corner independently.
-            let jitter = longest * rng.range_f64(0.0, 0.08);
+            let max_jitter = match kind {
+                PositiveKind::CleanLocalization => 0.01,
+                PositiveKind::FrameFilling => 0.04,
+                PositiveKind::VariedPhoto => 0.08,
+            };
+            let jitter = longest * rng.range_f64(0.0, max_jitter);
             let mut warped = base;
             for p in &mut warped {
                 p.x += rng.range_f64(-jitter, jitter);
@@ -190,8 +292,13 @@ fn random_target_quad(rng: &mut Rng, ink_box: &Quad, size: usize) -> Option<Quad
 
 /// Warp a sheet onto the canvas; returns the ink-box corners in canvas
 /// coordinates on success.
-fn place_sheet(rng: &mut Rng, canvas: &mut Canvas, sheet: &Sheet) -> Option<Quad> {
-    let target = random_target_quad(rng, &sheet.ink_box, canvas.width())?;
+fn place_sheet(
+    rng: &mut Rng,
+    canvas: &mut Canvas,
+    sheet: &Sheet,
+    kind: PositiveKind,
+) -> Option<Quad> {
+    let target = random_target_quad(rng, &sheet.ink_box, canvas.width(), kind)?;
     let graded = colour_grade(rng, &sheet.canvas);
 
     // Pre-shrink the sheet with a box filter when it is heavily minified so
@@ -284,6 +391,7 @@ mod tests {
             size: 64,
             seed: 1234,
             positive_ratio: 0.6,
+            source_scale: 3,
         }
     }
 
@@ -333,5 +441,76 @@ mod tests {
             0,
         );
         assert_ne!(a.image.as_raw(), b.image.as_raw());
+    }
+
+    #[test]
+    fn positive_curriculum_contains_all_explicit_subsets() {
+        let cfg = GeneratorConfig {
+            positive_ratio: 1.0,
+            ..cfg()
+        };
+        let mut seen = [false; 3];
+        for index in 0..100 {
+            match generate_sample(&cfg, index).positive_kind.unwrap() {
+                PositiveKind::CleanLocalization => seen[0] = true,
+                PositiveKind::FrameFilling => seen[1] = true,
+                PositiveKind::VariedPhoto => seen[2] = true,
+            }
+        }
+        assert_eq!(seen, [true; 3]);
+    }
+
+    #[test]
+    fn frame_filling_labels_have_a_narrow_margin() {
+        let cfg = GeneratorConfig {
+            positive_ratio: 1.0,
+            ..cfg()
+        };
+        let mut checked = 0;
+        for index in 0..200 {
+            let sample = generate_sample(&cfg, index);
+            if sample.positive_kind != Some(PositiveKind::FrameFilling) {
+                continue;
+            }
+            let quad = sample.corners.unwrap();
+            let min_x = quad.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+            let max_x = quad.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+            let min_y = quad.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+            let max_y = quad.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
+            assert!((max_x - min_x).max(max_y - min_y) >= f64::from(cfg.size) * 0.72);
+            checked += 1;
+        }
+        assert!(checked > 20, "only checked {checked} frame-filling samples");
+    }
+
+    #[test]
+    fn labels_scale_from_source_pixels_without_clipping() {
+        let ink_box = [
+            Point::new(0.0, 0.0),
+            Point::new(200.0, 0.0),
+            Point::new(200.0, 80.0),
+            Point::new(0.0, 80.0),
+        ];
+        let mut found_outside = false;
+        for seed in 0..200 {
+            let source = random_target_quad(
+                &mut Rng::from_seed(seed),
+                &ink_box,
+                384,
+                PositiveKind::FrameFilling,
+            )
+            .unwrap();
+            let final_quad = source.map(|p| Point::new(p.x / 3.0, p.y / 3.0));
+            for (source_point, final_point) in source.iter().zip(final_quad) {
+                assert!((final_point.x * 3.0 - source_point.x).abs() < 1e-12);
+                assert!((final_point.y * 3.0 - source_point.y).abs() < 1e-12);
+                found_outside |= !(0.0..=128.0).contains(&final_point.x)
+                    || !(0.0..=128.0).contains(&final_point.y);
+            }
+        }
+        assert!(
+            found_outside,
+            "expected at least one permitted out-of-frame label"
+        );
     }
 }

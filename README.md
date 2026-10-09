@@ -205,6 +205,11 @@ It keeps the UI in Kotlin but performs the `PhonoPaper` decoding pipeline in the
 
 Current app flow:
 
+> **Development worktree warning:** the checked-in detector weights predate the
+> current stride-2 heat-map architecture and cannot be loaded. The app detector
+> remains unusable until a new model is trained and embedded with
+> `phonopaper-ml/scripts/embed-model.sh`; see the ML README for the exact flow.
+
 - open the live camera preview and outline the `PhonoPaper` sheet found by the
   neural-network detector (`phonopaper_rs::decode::nn`) in real time, whatever
   its rotation or perspective — the thicker edges of the outline are the
@@ -370,8 +375,12 @@ if let Some(corners) = detector.find_corners(&frame, 0.5) {
 ```
 
 The frame is converted to grayscale and stretched to the 128 × 128 network
-input internally; corner accuracy is about ±2 px at that resolution, i.e.
-±1.5 % of the frame.
+input internally. For upright or approximately rectified images,
+`refine_pattern_corners` can conservatively refine coarse network corners to
+the outer marker ink box and reports confidence/support; it returns `None` for
+rotated, strongly skewed, or weakly supported inputs so callers can retain the
+coarse result. Accuracy claims must be re-established after training the new
+stride-2 model.
 
 ---
 
@@ -386,7 +395,7 @@ input internally; corner accuracy is about ±2 px at that resolution, i.e.
 | `phonopaper_rs::vector` | `spectrogram_to_svg`, `spectrogram_to_pdf`, `image_from_svg`, `image_from_pdf`, `PdfPageLayout`, `page_size` |
 | `phonopaper_rs::audio` | `read_audio_file` (WAV + MP3 → mono `f32` + sample rate) |
 | `phonopaper_rs::encode` | `AnalysisOptions`, `audio_to_spectrogram`, `encode_audio_to_image` |
-| `phonopaper_rs::decode` | `SynthesisOptions`, `AmplitudeMode`, `Synthesizer<SPS>`, `DataBounds`, `detect_markers`, `detect_markers_at_column`, `column_amplitudes_from_image`, `spectrogram_to_audio`, `decode_image_to_wav`, `decode_image_to_wav_sps` |
+| `phonopaper_rs::decode` | `SynthesisOptions`, `AmplitudeMode`, `Synthesizer<SPS>`, `DataBounds`, `CornerRefinement`, `detect_markers`, `detect_markers_at_column`, `refine_pattern_corners`, `column_amplitudes_from_image`, `spectrogram_to_audio`, `decode_image_to_wav`, `decode_image_to_wav_sps` |
 | `phonopaper_rs::decode::nn` (`nn-detector` feature) | `PatternDetector`, `Detection`, `Detector`, `DetectorConfig`, `load`, `prepare_image`, `embedded_config` |
 
 ---

@@ -3,7 +3,7 @@
 use burn::prelude::*;
 use burn::tensor::Device;
 use phonopaper_train::model::{Detection, DetectorConfig, OUTPUT_SIZE, decode_output, soft_argmax};
-use phonopaper_train::training::detection_loss;
+use phonopaper_train::training::heatmap_loss;
 
 #[test]
 fn forward_produces_nine_outputs_per_image() {
@@ -50,80 +50,60 @@ fn decode_output_applies_sigmoid_and_splits_corners() {
     assert!((det[0].corners[3][1] - 0.8).abs() < 1e-6);
 }
 
-#[test]
-fn perfect_prediction_has_near_zero_loss() {
-    let device = Device::flex();
-    let targets = Tensor::<2>::from_floats(
-        [
-            [1.0, 0.1, 0.1, 0.9, 0.1, 0.9, 0.9, 0.1, 0.9],
-            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        ],
-        &device,
-    );
-    // Very confident logits, exact corners.
-    let output = Tensor::<2>::from_floats(
-        [
-            [20.0, 0.1, 0.1, 0.9, 0.1, 0.9, 0.9, 0.1, 0.9],
-            [-20.0, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3],
-        ],
-        &device,
-    );
-    let loss: f32 = detection_loss(output, targets).into_scalar::<f32>();
-    assert!(loss < 1e-4, "loss = {loss}");
+fn corner_targets(device: &Device) -> Tensor<2> {
+    Tensor::<2>::from_floats(
+        [[
+            1.0, 0.0875, 0.0875, 0.9125, 0.0875, 0.9125, 0.9125, 0.0875, 0.9125,
+        ]],
+        device,
+    )
+}
+
+fn corner_logits(sharp: bool, rotate_channels: bool, device: &Device) -> Tensor<4> {
+    let side = 16;
+    let cells = side * side;
+    let positions = [(2, 2), (13, 2), (13, 13), (2, 13)];
+    let mut values = vec![0.0_f32; 4 * cells];
+    for channel in 0..4 {
+        let source = if rotate_channels {
+            (channel + 2) % 4
+        } else {
+            channel
+        };
+        let (col, row) = positions[source];
+        values[channel * cells + row * side + col] = if sharp { 12.0 } else { 2.0 };
+    }
+    Tensor::<1>::from_floats(values.as_slice(), device).reshape([1, 4, side, side])
 }
 
 #[test]
-fn corner_errors_on_negatives_do_not_count_but_positives_do() {
+fn sharp_heatmaps_beat_diffuse_heatmaps() {
     let device = Device::flex();
-    let targets =
-        Tensor::<2>::from_floats([[1.0, 0.1, 0.1, 0.9, 0.1, 0.9, 0.9, 0.1, 0.9]], &device);
-    let good = Tensor::<2>::from_floats([[20.0, 0.1, 0.1, 0.9, 0.1, 0.9, 0.9, 0.1, 0.9]], &device);
-    let bad = Tensor::<2>::from_floats([[20.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]], &device);
-    let l_good: f32 = detection_loss(good, targets.clone()).into_scalar::<f32>();
-    let l_bad: f32 = detection_loss(bad, targets).into_scalar::<f32>();
-    assert!(l_bad > l_good + 0.02, "good = {l_good}, bad = {l_bad}");
-
-    let neg_targets = Tensor::<2>::from_floats([[0.0; 9]], &device);
-    let neg_a =
-        Tensor::<2>::from_floats([[-20.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]], &device);
-    let neg_b =
-        Tensor::<2>::from_floats([[-20.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0]], &device);
-    let la: f32 = detection_loss(neg_a, neg_targets.clone()).into_scalar::<f32>();
-    let lb: f32 = detection_loss(neg_b, neg_targets).into_scalar::<f32>();
-    assert!(
-        (la - lb).abs() < 1e-6,
-        "negatives must not be penalised on corners"
-    );
+    let targets = corner_targets(&device);
+    let sharp: f32 =
+        heatmap_loss(corner_logits(true, false, &device), targets.clone()).into_scalar();
+    let diffuse: f32 = heatmap_loss(corner_logits(false, false, &device), targets).into_scalar();
+    assert!(sharp < diffuse, "sharp={sharp}, diffuse={diffuse}");
 }
 
 #[test]
-fn loss_is_invariant_under_a_half_turn_of_the_sheet() {
-    // TL, TR, BR, BL of an upright rectangle …
-    let upright = [1.0, 0.1, 0.1, 0.9, 0.1, 0.9, 0.9, 0.1, 0.9];
-    // … and the same rectangle labelled from the opposite end.
-    let turned = [1.0, 0.9, 0.9, 0.1, 0.9, 0.1, 0.1, 0.9, 0.1];
+fn heatmap_loss_is_invariant_to_half_turn_channel_rotation() {
     let device = Device::flex();
-    let output =
-        Tensor::<2>::from_floats([[20.0, 0.1, 0.1, 0.9, 0.1, 0.9, 0.9, 0.1, 0.9]], &device);
-    let l_upright: f32 =
-        detection_loss(output.clone(), Tensor::<2>::from_floats([upright], &device))
-            .into_scalar::<f32>();
-    let l_turned: f32 =
-        detection_loss(output, Tensor::<2>::from_floats([turned], &device)).into_scalar::<f32>();
-    assert!(l_upright < 1e-4, "exact prediction: {l_upright}");
-    assert!(
-        (l_upright - l_turned).abs() < 1e-6,
-        "both labellings must score the same: {l_upright} vs {l_turned}"
-    );
-    // A 90° relabelling (bands on the wrong edges) is NOT equivalent.
-    let quarter = [1.0, 0.9, 0.1, 0.9, 0.9, 0.1, 0.9, 0.1, 0.1];
-    let out2 = Tensor::<2>::from_floats([[20.0, 0.1, 0.1, 0.9, 0.1, 0.9, 0.9, 0.1, 0.9]], &device);
-    let l_quarter: f32 =
-        detection_loss(out2, Tensor::<2>::from_floats([quarter], &device)).into_scalar::<f32>();
-    assert!(
-        l_quarter > 0.02,
-        "quarter turn must be penalised: {l_quarter}"
-    );
+    let targets = corner_targets(&device);
+    let direct: f32 =
+        heatmap_loss(corner_logits(true, false, &device), targets.clone()).into_scalar();
+    let rotated: f32 = heatmap_loss(corner_logits(true, true, &device), targets).into_scalar();
+    assert!((direct - rotated).abs() < 1e-5, "{direct} vs {rotated}");
+}
+
+#[test]
+fn negatives_mask_heatmaps_and_all_negative_batch_is_safe() {
+    let device = Device::flex();
+    let targets = Tensor::<2>::zeros([2, 9], &device);
+    let loss: f32 =
+        heatmap_loss(Tensor::<4>::zeros([2, 4, 16, 16], &device), targets).into_scalar();
+    assert!(loss.is_finite());
+    assert_eq!(loss, 0.0);
 }
 
 #[test]
@@ -147,10 +127,13 @@ fn soft_argmax_recovers_a_peaked_cell() {
 }
 
 #[test]
-fn heatmap_size_is_stride_4() {
+fn heatmaps_are_genuine_stride_2() {
     let device = Device::flex();
     let model = DetectorConfig::new().init(&device);
-    assert_eq!(model.heatmap_size(), 32);
+    assert_eq!(model.heatmap_size(), 64);
+    let prediction = model.forward_with_heatmaps(Tensor::<4>::zeros([2, 1, 128, 128], &device));
+    assert_eq!(prediction.output.dims(), [2, OUTPUT_SIZE]);
+    assert_eq!(prediction.heatmaps.dims(), [2, 4, 64, 64]);
 }
 
 #[test]
