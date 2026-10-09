@@ -188,10 +188,6 @@ fn detect_prepared_matches_detect() {
 }
 
 #[test]
-#[expect(
-    clippy::float_cmp,
-    reason = "exact synthetic values verify that reordering preserves them"
-)]
 fn detection_orderings() {
     let d = Detection {
         probability: 0.9,

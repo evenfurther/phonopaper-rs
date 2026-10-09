@@ -225,10 +225,39 @@ cd android-app
 ./gradlew assembleRelease
 ```
 
-The release build is signed with the standard Android debug keystore so it
-remains directly installable for testing while still using the release
-optimization profile. The CI workflow uploads
-`app/build/outputs/apk/release/app-release.apk` as the installable artifact.
+Without signing environment variables, the release build uses the standard
+Android debug keystore so it remains directly installable for local testing
+while still using the release optimization profile. Pull-request CI uploads
+`app/build/outputs/apk/release/app-release.apk` as a temporary Actions artifact.
+
+### Install main snapshots with Obtainium
+
+Every successful `main` CI run publishes a permanently signed, immutable GitHub
+prerelease tagged `android-main-<CI run number>`. Each prerelease contains the
+universal `phonopaper-android-main.apk` and its SHA-256 checksum. The APK version
+code is the monotonically increasing CI run number, and its version name records
+both that number and the source commit.
+
+To follow this channel in Obtainium:
+
+1. Add `https://github.com/evenfurther/phonopaper-rs` as a GitHub source.
+2. Enable inclusion of prereleases.
+3. Set the release asset regular expression to
+   `^phonopaper-android-main\.apk$` if Obtainium does not select it automatically.
+
+The application ID is `com.evenfurther.phonopaper`. Main snapshots track current
+development and do not have the stability guarantees of a normal release.
+Android requires every update to have the same signing identity, so a previously
+installed local or CI debug-signed APK must be uninstalled once before installing
+the first Obtainium snapshot. This removes that installation's app data.
+
+Release signing is configured by `ANDROID_KEYSTORE_PATH`,
+`ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`.
+All four variables must be supplied together. CI restores these values from the
+`ANDROID_RELEASE_KEYSTORE_BASE64`, `ANDROID_RELEASE_KEYSTORE_PASSWORD`,
+`ANDROID_RELEASE_KEY_ALIAS`, and `ANDROID_RELEASE_KEY_PASSWORD` repository
+secrets. The keystore and credentials are irreplaceable: keep encrypted offline
+backups because losing either prevents in-place updates to existing installs.
 
 ## Library usage
 
