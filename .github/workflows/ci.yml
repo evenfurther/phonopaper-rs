@@ -65,6 +65,7 @@ jobs:
 
   android-apk:
     name: Android APK
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: ""
@@ -94,15 +95,54 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
+      - name: Set merge snapshot metadata
+        if: github.event_name == 'merge_group'
+        env:
+          CI_HEAD_SHA: ${{ github.sha }}
+        run: |
+          echo "ANDROID_SIGNING_MODE=unsigned" >> "$GITHUB_ENV"
+          echo "ANDROID_VERSION_CODE=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+          echo "ANDROID_VERSION_NAME=0.1.0-main.$GITHUB_RUN_NUMBER+${CI_HEAD_SHA:0:7}" >> "$GITHUB_ENV"
+
       - name: Build Android release APK
         working-directory: android-app
         run: ./gradlew assembleRelease --stacktrace
 
-      - name: Upload installable Android APK artifact
+      - name: Record merge artifact metadata
+        if: github.event_name == 'merge_group'
+        env:
+          CI_HEAD_SHA: ${{ github.sha }}
+        run: |
+          APK=android-app/app/build/outputs/apk/release/app-release-unsigned.apk
+          sha256sum "$APK" | cut -d' ' -f1 > /tmp/apk-sha256
+          jq -n \
+            --arg head_sha "$CI_HEAD_SHA" \
+            --argjson run_id "$GITHUB_RUN_ID" \
+            --argjson run_number "$GITHUB_RUN_NUMBER" \
+            --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg version_name "0.1.0-main.$GITHUB_RUN_NUMBER+${CI_HEAD_SHA:0:7}" \
+            --arg apk_sha256 "$(cat /tmp/apk-sha256)" \
+            '{head_sha: $head_sha, run_id: $run_id, run_number: $run_number,
+              run_attempt: $run_attempt, version_code: $run_number,
+              version_name: $version_name, apk_sha256: $apk_sha256}' \
+            > android-app/app/build/outputs/apk/release/merge-artifact.json
+
+      - name: Upload installable PR APK artifact
+        if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: phonopaper-android-installable-apk
           path: android-app/app/build/outputs/apk/release/app-release.apk
+          retention-days: 30
+
+      - name: Upload unsigned merge APK artifact
+        if: github.event_name == 'merge_group'
+        uses: actions/upload-artifact@v7
+        with:
+          name: phonopaper-android-merge-group-apk
+          path: |
+            android-app/app/build/outputs/apk/release/app-release-unsigned.apk
+            android-app/app/build/outputs/apk/release/merge-artifact.json
           retention-days: 30
 
   bench-iai:

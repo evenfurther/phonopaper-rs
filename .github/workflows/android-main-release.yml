@@ -1,59 +1,105 @@
 name: Android main release
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  push:
     branches: [main]
 
 permissions:
+  actions: read
   contents: write
 
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-  RUSTFLAGS: ""
-  ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
-  ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
-  ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+concurrency:
+  group: android-main-release-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
   publish:
-    name: Publish signed APK
-    if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push'
+    name: Sign and publish merge APK
     runs-on: ubuntu-latest
     steps:
-      - name: Check out tested commit
-        uses: actions/checkout@v7
+      - name: Find successful merge-group CI run
+        id: merge-run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN_SHA: ${{ github.sha }}
+        run: |
+          run=$(
+            gh api --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+              -f event=merge_group \
+              -f head_sha="$MAIN_SHA" \
+              -f status=success \
+              -f per_page=100 \
+              | jq -c --arg sha "$MAIN_SHA" \
+                '[.workflow_runs[]
+                  | select(.event == "merge_group"
+                    and .status == "completed"
+                    and .conclusion == "success"
+                    and .head_sha == $sha
+                    and (.head_branch | startswith("gh-readonly-queue/main/")))]
+                  | sort_by(.run_attempt, .updated_at) | last // empty'
+          )
+          if [[ -z "$run" ]]; then
+            echo "No successful merge-group CI run matches main commit $MAIN_SHA; skipping snapshot publication."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          run_id=$(jq -r '.id' <<<"$run")
+          run_number=$(jq -r '.run_number' <<<"$run")
+          echo "Found merge-group CI run $run_id (run number $run_number)."
+          {
+            echo "found=true"
+            echo "run_id=$run_id"
+            echo "run_number=$run_number"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download exact merge-group APK artifact
+        if: steps.merge-run.outputs.found == 'true'
+        uses: actions/download-artifact@v8
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
-
-      - name: Install Rust toolchain (stable)
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Add Android Rust targets
-        run: rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Set up Java 17
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: '25.0.4+101.0.LTS'
+          name: phonopaper-android-merge-group-apk
+          path: downloaded-apk
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.merge-run.outputs.run_id }}
 
       - name: Set up Android SDK
+        if: steps.merge-run.outputs.found == 'true'
         uses: android-actions/setup-android@v4
         with:
-          packages: platform-tools platforms;android-37.0 build-tools;37.0.0
+          packages: platform-tools build-tools;37.0.0
           log-accepted-android-sdk-licenses: false
 
-      - name: Install cargo-ndk
-        run: cargo install cargo-ndk --locked
+      - name: Validate merge artifact provenance
+        if: steps.merge-run.outputs.found == 'true'
+        env:
+          MAIN_SHA: ${{ github.sha }}
+          MERGE_RUN_ID: ${{ steps.merge-run.outputs.run_id }}
+          MERGE_RUN_NUMBER: ${{ steps.merge-run.outputs.run_number }}
+        run: |
+          APK=downloaded-apk/app-release-unsigned.apk
+          METADATA=downloaded-apk/merge-artifact.json
+          expected_version="0.1.0-main.$MERGE_RUN_NUMBER+${MAIN_SHA:0:7}"
+          jq -e \
+            --arg sha "$MAIN_SHA" \
+            --argjson run_id "$MERGE_RUN_ID" \
+            --argjson run_number "$MERGE_RUN_NUMBER" \
+            --arg version_name "$expected_version" \
+            '.head_sha == $sha and .run_id == $run_id
+              and .run_number == $run_number and .version_code == $run_number
+              and .version_name == $version_name' \
+            "$METADATA" >/dev/null
+          expected_apk_sha=$(jq -r '.apk_sha256' "$METADATA")
+          echo "$expected_apk_sha  $APK" | sha256sum --check --strict
+          if "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify "$APK" >/dev/null 2>&1; then
+            echo 'Merge-group APK is unexpectedly signed; refusing privileged publication.' >&2
+            exit 1
+          fi
+          echo "ANDROID_VERSION_CODE=$MERGE_RUN_NUMBER" >> "$GITHUB_ENV"
+          echo "ANDROID_VERSION_NAME=$expected_version" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=android-main-$MERGE_RUN_NUMBER" >> "$GITHUB_ENV"
 
       - name: Restore release keystore
+        if: steps.merge-run.outputs.found == 'true'
         env:
           ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
         run: |
@@ -61,48 +107,57 @@ jobs:
             echo 'ANDROID_RELEASE_KEYSTORE_BASE64 is not configured' >&2
             exit 1
           fi
-          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/phonopaper-release.jks"
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" \
+            | base64 --decode > "$RUNNER_TEMP/phonopaper-release.jks"
           chmod 600 "$RUNNER_TEMP/phonopaper-release.jks"
-          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/phonopaper-release.jks" >> "$GITHUB_ENV"
 
-      - name: Set snapshot version
+      - name: Align and sign APK
+        if: steps.merge-run.outputs.found == 'true'
         env:
-          CI_RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
-          CI_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
         run: |
-          echo "ANDROID_VERSION_CODE=$CI_RUN_NUMBER" >> "$GITHUB_ENV"
-          echo "ANDROID_VERSION_NAME=0.1.0-main.$CI_RUN_NUMBER+${CI_HEAD_SHA:0:7}" >> "$GITHUB_ENV"
-          echo "RELEASE_TAG=android-main-$CI_RUN_NUMBER" >> "$GITHUB_ENV"
-
-      - name: Build signed release APK
-        working-directory: android-app
-        run: ./gradlew assembleRelease --stacktrace
-
-      - name: Verify APK
-        run: |
-          APK=android-app/app/build/outputs/apk/release/app-release.apk
           BUILD_TOOLS="$ANDROID_HOME/build-tools/37.0.0"
-          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
+          "$BUILD_TOOLS/zipalign" -P 16 -f 4 \
+            downloaded-apk/app-release-unsigned.apk aligned.apk
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$RUNNER_TEMP/phonopaper-release.jks" \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --key-pass env:ANDROID_KEY_PASSWORD \
+            --out phonopaper-android-main.apk \
+            aligned.apk
+
+      - name: Verify signed APK
+        if: steps.merge-run.outputs.found == 'true'
+        env:
+          EXPECTED_SIGNER_SHA256: a0467211bc620a8b90b4f6f18e007c5ac696b06d13d30a65d4a34dcb36ca2d1c
+        run: |
+          APK=phonopaper-android-main.apk
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/37.0.0"
+          signer=$(
+            "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK" \
+              | sed -n 's/^Signer #1 certificate SHA-256 digest: //p'
+          )
+          [[ "${signer,,}" == "$EXPECTED_SIGNER_SHA256" ]]
           "$BUILD_TOOLS/aapt" dump badging "$APK" \
             | grep -F "package: name='com.evenfurther.phonopaper' versionCode='$ANDROID_VERSION_CODE' versionName='$ANDROID_VERSION_NAME'"
           for abi in arm64-v8a armeabi-v7a x86_64; do
             unzip -l "$APK" | grep -F "lib/$abi/libphonopaper_android.so"
           done
-
-      - name: Prepare release assets
-        run: |
-          cp android-app/app/build/outputs/apk/release/app-release.apk phonopaper-android-main.apk
-          sha256sum phonopaper-android-main.apk > phonopaper-android-main.apk.sha256
+          sha256sum "$APK" > phonopaper-android-main.apk.sha256
 
       - name: Publish immutable main snapshot
+        if: steps.merge-run.outputs.found == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          CI_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          HEAD_SHA: ${{ github.sha }}
+          MERGE_RUN_ID: ${{ steps.merge-run.outputs.run_id }}
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "Release $RELEASE_TAG already exists; leaving the immutable snapshot unchanged."
-            exit 0
+            echo "Release $RELEASE_TAG already exists; refusing to replace an immutable snapshot." >&2
+            exit 1
           fi
           gh release create "$RELEASE_TAG" \
             phonopaper-android-main.apk \
@@ -110,4 +165,4 @@ jobs:
             --prerelease \
             --target "$HEAD_SHA" \
             --title "Android main build $ANDROID_VERSION_CODE" \
-            --notes "Signed Android snapshot of main at $HEAD_SHA. Built and tested by $CI_RUN_URL."
+            --notes "Signed Android snapshot of main at $HEAD_SHA, built by merge-group CI run $MERGE_RUN_ID."
