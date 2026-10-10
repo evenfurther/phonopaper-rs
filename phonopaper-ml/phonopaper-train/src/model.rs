@@ -252,7 +252,7 @@ impl Detector {
         for feature in projected {
             let upsampled = interpolate(
                 feature,
-                InterpolateOptions::new(InterpolateMode::Bilinear).with_output_size([h, w]),
+                InterpolateOptions::new(InterpolateMode::Nearest).with_output_size([h, w]),
             );
             fused = fused + upsampled;
         }

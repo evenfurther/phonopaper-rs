@@ -273,7 +273,7 @@ trunk     5 × (conv 3×3 → BatchNorm → ReLU → maxpool 2)
 presence  global average pool of final stride-32 stage → Linear(128 → 1 logit)
 corners   all five stages (strides 2, 4, 8, 16 and 32)
           → separate 1×1 projections to 64 channels
-          → bilinear upsample to 64 × 64 and sum
+          → nearest-neighbor upsample to 64 × 64 and sum
           → 2 × (conv 3×3 → BatchNorm → ReLU) → conv 1×1
           → 4 cell-logit + 4 x-offset + 4 y-offset maps (64 × 64)
 ```
