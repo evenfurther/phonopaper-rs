@@ -2,7 +2,10 @@
 
 use burn::prelude::*;
 use burn::tensor::Device;
-use phonopaper_train::model::{Detection, DetectorConfig, OUTPUT_SIZE, decode_output, soft_argmax};
+use phonopaper_train::model::{
+    CORNER_FUSION_STAGES, CORNER_HEAD_CHANNELS, Detection, DetectorConfig, OUTPUT_SIZE,
+    decode_corners, decode_output, soft_argmax,
+};
 use phonopaper_train::training::heatmap_loss;
 
 #[test]
@@ -127,13 +130,168 @@ fn soft_argmax_recovers_a_peaked_cell() {
 }
 
 #[test]
-fn heatmaps_are_genuine_stride_2() {
+fn corner_head_fuses_all_stages_and_exposes_raw_maps() {
     let device = Device::flex();
     let model = DetectorConfig::new().init(&device);
+    assert_eq!(CORNER_FUSION_STAGES, 5);
+    assert_eq!(CORNER_HEAD_CHANNELS, 12);
     assert_eq!(model.heatmap_size(), 64);
     let prediction = model.forward_with_heatmaps(Tensor::<4>::zeros([2, 1, 128, 128], &device));
     assert_eq!(prediction.output.dims(), [2, OUTPUT_SIZE]);
+    assert_eq!(prediction.corner_raw.dims(), [2, 12, 64, 64]);
     assert_eq!(prediction.heatmaps.dims(), [2, 4, 64, 64]);
+    assert_eq!(prediction.x_offsets.dims(), [2, 4, 64, 64]);
+    assert_eq!(prediction.y_offsets.dims(), [2, 4, 64, 64]);
+}
+
+fn raw_corner_maps(
+    side: usize,
+    peaks: &[(usize, usize, usize, f32)],
+    offsets: &[(usize, usize, usize, f32, f32)],
+    device: &Device,
+) -> (Tensor<4>, Tensor<4>, Tensor<4>) {
+    let cells = side * side;
+    let mut logits = vec![0.0; 4 * cells];
+    let mut xs = vec![0.0; 4 * cells];
+    let mut ys = vec![0.0; 4 * cells];
+    for &(corner, row, col, value) in peaks {
+        logits[corner * cells + row * side + col] = value;
+    }
+    for &(corner, row, col, x, y) in offsets {
+        let index = corner * cells + row * side + col;
+        xs[index] = x;
+        ys[index] = y;
+    }
+    (
+        Tensor::<1>::from_floats(logits.as_slice(), device).reshape([1, 4, side, side]),
+        Tensor::<1>::from_floats(xs.as_slice(), device).reshape([1, 4, side, side]),
+        Tensor::<1>::from_floats(ys.as_slice(), device).reshape([1, 4, side, side]),
+    )
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "test grids contain only two or four cells"
+)]
+fn grid_centre(index: usize, side: usize) -> f32 {
+    -0.1 + 1.2 * (index as f32 + 0.5) / side as f32
+}
+
+#[test]
+fn hard_decoder_returns_selected_cell_centres() {
+    let device = Device::flex();
+    let peaks = [
+        (0, 0, 3, 10.0),
+        (1, 3, 0, 10.0),
+        (2, 1, 2, 10.0),
+        (3, 2, 1, 10.0),
+    ];
+    let (logits, xs, ys) = raw_corner_maps(4, &peaks, &[], &device);
+    let coords: Vec<f32> = decode_corners(logits, xs, ys)
+        .into_data()
+        .try_into_vec()
+        .unwrap();
+    let expected = [
+        grid_centre(3, 4),
+        grid_centre(0, 4),
+        grid_centre(0, 4),
+        grid_centre(3, 4),
+        grid_centre(2, 4),
+        grid_centre(1, 4),
+        grid_centre(1, 4),
+        grid_centre(2, 4),
+    ];
+    for (actual, expected) in coords.iter().zip(expected) {
+        assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+    }
+}
+
+#[test]
+fn hard_decoder_applies_bounded_selected_cell_offsets() {
+    let device = Device::flex();
+    let peaks = [(0, 1, 2, 10.0)];
+    let offsets = [(0, 1, 2, 1.0, -1.0)];
+    let (logits, xs, ys) = raw_corner_maps(4, &peaks, &offsets, &device);
+    let coords: Vec<f32> = decode_corners(logits, xs, ys)
+        .into_data()
+        .try_into_vec()
+        .unwrap();
+    let displacement = 0.15 * 1.0_f32.tanh();
+    assert!((coords[0] - (grid_centre(2, 4) + displacement)).abs() < 1e-6);
+    assert!((coords[1] - (grid_centre(1, 4) - displacement)).abs() < 1e-6);
+}
+
+#[test]
+fn hard_decoder_ignores_diffuse_secondary_mass() {
+    let device = Device::flex();
+    let mut peaks = vec![(0, 0, 0, 10.0)];
+    for row in 0..4 {
+        for col in 0..4 {
+            if row != 0 || col != 0 {
+                peaks.push((0, row, col, 9.9));
+            }
+        }
+    }
+    let (logits, xs, ys) = raw_corner_maps(4, &peaks, &[], &device);
+    let coords: Vec<f32> = decode_corners(logits, xs, ys)
+        .into_data()
+        .try_into_vec()
+        .unwrap();
+    assert!((coords[0] - grid_centre(0, 4)).abs() < 1e-6);
+    assert!((coords[1] - grid_centre(0, 4)).abs() < 1e-6);
+}
+
+#[test]
+fn offset_channels_correspond_to_the_same_corner_and_cell() {
+    let device = Device::flex();
+    let peaks = [
+        (0, 0, 0, 10.0),
+        (1, 0, 1, 10.0),
+        (2, 1, 0, 10.0),
+        (3, 1, 1, 10.0),
+    ];
+    let offsets = [
+        (0, 0, 0, -2.0, 2.0),
+        (1, 0, 1, -1.0, 1.0),
+        (2, 1, 0, 1.0, -1.0),
+        (3, 1, 1, 2.0, -2.0),
+        (0, 1, 1, 100.0, 100.0),
+    ];
+    let (logits, xs, ys) = raw_corner_maps(2, &peaks, &offsets, &device);
+    let coords: Vec<f32> = decode_corners(logits, xs, ys)
+        .into_data()
+        .try_into_vec()
+        .unwrap();
+    let half_cell = 0.3;
+    let expected = [
+        grid_centre(0, 2) - half_cell * 2.0_f32.tanh(),
+        grid_centre(0, 2) + half_cell * 2.0_f32.tanh(),
+        grid_centre(1, 2) - half_cell * 1.0_f32.tanh(),
+        grid_centre(0, 2) + half_cell * 1.0_f32.tanh(),
+        grid_centre(0, 2) + half_cell * 1.0_f32.tanh(),
+        grid_centre(1, 2) - half_cell * 1.0_f32.tanh(),
+        grid_centre(1, 2) + half_cell * 2.0_f32.tanh(),
+        grid_centre(1, 2) - half_cell * 2.0_f32.tanh(),
+    ];
+    for (actual, expected) in coords.iter().zip(expected) {
+        assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+    }
+}
+
+#[test]
+fn raw_corner_maps_follow_variable_input_size() {
+    let device = Device::flex();
+    for input_size in [64, 128] {
+        let model = DetectorConfig::new()
+            .with_input_size(input_size)
+            .init(&device);
+        let prediction = model
+            .forward_with_heatmaps(Tensor::<4>::zeros([1, 1, input_size, input_size], &device));
+        assert_eq!(
+            prediction.corner_raw.dims(),
+            [1, 12, input_size / 2, input_size / 2]
+        );
+    }
 }
 
 #[test]
