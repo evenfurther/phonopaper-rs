@@ -84,7 +84,7 @@ fn embedded_config_matches_model() {
     assert_eq!(config.input_size, 128);
     let model = load();
     assert_eq!(model.input_size(), 128);
-    assert_eq!(model.heatmap_size(), 32);
+    assert_eq!(model.heatmap_size(), 64);
     let detector = PatternDetector::new();
     assert_eq!(detector.input_size(), 128);
     assert_eq!(detector.model().input_size(), 128);
