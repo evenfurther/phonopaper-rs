@@ -8,6 +8,7 @@ use burn::lr_scheduler::cosine::CosineAnnealingLrSchedulerConfig;
 use burn::optim::AdamConfig;
 use burn::prelude::*;
 use burn::tensor::Device;
+use burn::tensor::Int;
 use burn::tensor::activation::{log_sigmoid, log_softmax};
 use burn::train::checkpoint::KeepLastNCheckpoints;
 use burn::train::metric::LossMetric;
@@ -32,32 +33,18 @@ pub const MODEL_CONFIG_FILE: &str = "model.json";
 /// File name of the training hyper-parameters.
 pub const TRAIN_CONFIG_FILE: &str = "training.json";
 
-/// Weight of the corner regression term relative to the presence term.
-///
-/// Corner errors are measured in normalised units (an error of `0.01` is
-/// about one pixel on a 128 px input), so they need a large weight to matter
-/// as much as the classification term.
-pub const CORNER_LOSS_WEIGHT: f64 = 20.0;
-
-/// Weight of direct heat-map supervision relative to presence classification.
-///
-/// Unit-normalized Gaussian targets make this a cross-entropy in natural-log
-/// units, so one keeps it comparable to the presence binary cross-entropy.
+/// Weight of compact target-cell classification relative to presence BCE.
 pub const HEATMAP_LOSS_WEIGHT: f64 = 1.0;
-
-/// Standard deviation of target Gaussians in normalized image coordinates.
-///
-/// At the default 128-pixel input this is 2.56 pixels, broad enough to provide
-/// gradients around a corner while still rewarding a sharply localized peak.
-pub const HEATMAP_SIGMA: f32 = 0.02;
-
-/// Transition point of the smooth-L1 (Huber) corner loss, in normalised units
-/// (`0.01` ≈ 1.3 px on a 128 px input).
-///
-/// Below δ the loss is quadratic and its gradient fades, so δ is effectively
-/// the precision the network stops caring about: with δ = 0.05 the mean
-/// corner error plateaued at exactly 6.4 px = 0.05 × 128.
-pub const HUBER_DELTA: f64 = 0.01;
+/// Weight of x/y offset supervision at the four target cells.
+pub const OFFSET_LOSS_WEIGHT: f64 = 2.0;
+/// Weight of decoded-coordinate Charbonnier supervision.
+pub const COORDINATE_LOSS_WEIGHT: f64 = 5.0;
+/// Weight of translation-invariant directed edge-vector supervision.
+pub const EDGE_LOSS_WEIGHT: f64 = 2.0;
+/// Weight of relative quadrilateral width/height supervision.
+pub const SIZE_LOSS_WEIGHT: f64 = 1.0;
+/// Charbonnier smoothing in normalized coordinate units.
+pub const CHARBONNIER_EPSILON: f64 = 1.0e-3;
 
 /// Training hyper-parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,114 +88,281 @@ impl Default for TrainingConfig {
     }
 }
 
-/// Compute the training loss from one trunk pass.
+/// Individually inspectable terms of the detector objective.
 ///
-/// The objective combines presence binary cross-entropy, direct normalized
-/// Gaussian heat-map cross-entropy, and smooth-L1 decoded-coordinate loss.
-/// Spatial terms are averaged over positive samples only. Both spatial terms
-/// take the minimum over direct corner order and a two-channel rotation, since
-/// a `PhonoPaper` sheet is indistinguishable after a 180° turn.
+/// `total` uses [`HEATMAP_LOSS_WEIGHT`], [`OFFSET_LOSS_WEIGHT`],
+/// [`COORDINATE_LOSS_WEIGHT`], [`EDGE_LOSS_WEIGHT`], and
+/// [`SIZE_LOSS_WEIGHT`]. All fields are scalar tensors.
+pub struct DetectionLoss {
+    /// Presence binary cross-entropy.
+    pub presence: Tensor<1>,
+    /// Hard nearest-cell cross-entropy.
+    pub heatmap: Tensor<1>,
+    /// Selected target-cell x/y offset error.
+    pub offset: Tensor<1>,
+    /// Decoded corner-coordinate Charbonnier error.
+    pub coordinate: Tensor<1>,
+    /// Translation-invariant directed edge-vector error.
+    pub edge: Tensor<1>,
+    /// Relative width/height error.
+    pub size: Tensor<1>,
+    /// Weighted sum used for back-propagation and learner metrics.
+    pub total: Tensor<1>,
+}
+
+/// Target cells and center-relative displacements for four corners.
+pub struct CornerCellTargets {
+    /// Flattened cell indices with shape `[batch, 4, 1]`.
+    pub indices: Tensor<3, Int>,
+    /// Desired x displacement from each selected cell center.
+    pub x_offsets: Tensor<3>,
+    /// Desired y displacement from each selected cell center.
+    pub y_offsets: Tensor<3>,
+}
+
+/// Compute the complete structured detector loss from one trunk pass.
+///
+/// One decoded-coordinate comparison chooses either the direct target ordering
+/// or its equivalent 180° ordering per sample. That assigned target is shared
+/// by every spatial term. Negatives are excluded from all spatial terms, and
+/// an all-negative batch therefore has finite, exactly zero spatial losses.
 #[must_use]
-pub fn detection_loss(prediction: DetectorOutput, targets: Tensor<2>) -> Tensor<1> {
+pub fn detection_loss_breakdown(prediction: DetectorOutput, targets: Tensor<2>) -> DetectionLoss {
     let logits = prediction.output.clone().narrow(1, 0, 1);
     let present = targets.clone().narrow(1, 0, 1);
     let absent = present.clone().neg().add_scalar(1.0);
-    let bce = (present.clone() * log_sigmoid(logits.clone()) + absent * log_sigmoid(logits.neg()))
-        .neg()
-        .mean();
+    let presence = (present.clone() * log_sigmoid(logits.clone())
+        + absent * log_sigmoid(logits.neg()))
+    .neg()
+    .mean();
 
     let predicted = prediction.output.narrow(1, 1, 8);
-    let truth = targets.clone().narrow(1, 1, 8);
-    let direct = corner_huber(predicted.clone(), truth.clone());
-    let rotated = corner_huber(predicted, rotate_180(truth));
-    let positives = present.clone().sum().clamp_min(1.0);
-    let corner = (direct.min_pair(rotated) * present.clone()).sum() / positives.clone();
-    let heatmap = heatmap_loss(prediction.heatmaps, targets);
-
-    bce + corner.mul_scalar(CORNER_LOSS_WEIGHT) + heatmap.mul_scalar(HEATMAP_LOSS_WEIGHT)
+    let truth = targets.narrow(1, 1, 8);
+    let assigned = assign_corner_targets(predicted.clone(), truth);
+    let [_, _, h, w] = prediction.heatmaps.dims();
+    let cells = corner_cell_targets(assigned.clone(), h, w);
+    let heatmap = assigned_heatmap_loss(prediction.heatmaps, &cells, present.clone());
+    let offset = offset_loss(
+        prediction.x_offsets,
+        prediction.y_offsets,
+        &cells,
+        present.clone(),
+    );
+    let coordinate = masked_mean(
+        charbonnier(predicted.clone() - assigned.clone()).mean_dim(1),
+        present.clone(),
+    );
+    let edge = edge_vector_loss(predicted.clone(), assigned.clone(), present.clone());
+    let size = relative_size_loss(predicted, assigned, present);
+    let total = presence.clone()
+        + heatmap.clone().mul_scalar(HEATMAP_LOSS_WEIGHT)
+        + offset.clone().mul_scalar(OFFSET_LOSS_WEIGHT)
+        + coordinate.clone().mul_scalar(COORDINATE_LOSS_WEIGHT)
+        + edge.clone().mul_scalar(EDGE_LOSS_WEIGHT)
+        + size.clone().mul_scalar(SIZE_LOSS_WEIGHT);
+    DetectionLoss {
+        presence,
+        heatmap,
+        offset,
+        coordinate,
+        edge,
+        size,
+        total,
+    }
 }
 
-/// Gaussian cross-entropy for raw `[batch, 4, h, w]` corner heat-map logits.
+/// Compute the scalar detector objective used by Burn's learner.
+#[must_use]
+pub fn detection_loss(prediction: DetectorOutput, targets: Tensor<2>) -> Tensor<1> {
+    detection_loss_breakdown(prediction, targets).total
+}
+
+/// Choose one direct-vs-180° target ordering per sample.
 ///
-/// Target Gaussians are normalized independently per corner. Negative samples
-/// are masked, and an all-negative batch returns a finite zero heat-map loss.
-/// A two-channel rotation represents the equivalent 180° corner ordering.
+/// The choice minimizes decoded-coordinate Charbonnier error and is then used
+/// unchanged by all spatial objectives.
+#[must_use]
+pub fn assign_corner_targets(predicted: Tensor<2>, truth: Tensor<2>) -> Tensor<2> {
+    let rotated = rotate_180(truth.clone());
+    let direct_error = charbonnier(predicted.clone() - truth.clone()).mean_dim(1);
+    let rotated_error = charbonnier(predicted - rotated.clone()).mean_dim(1);
+    let use_rotated = rotated_error.lower(direct_error).repeat_dim(1, 8);
+    truth.mask_where(use_rotated, rotated)
+}
+
+/// Build hard nearest-cell targets and exact center-relative offsets.
+///
+/// Coordinates outside the grid are assigned to its nearest boundary cell;
+/// their displacement remains explicit instead of being silently clipped.
 ///
 /// # Panics
 ///
-/// Panics unless `heatmaps` has exactly four corner channels, or if `targets`
-/// cannot be read as `f32` values.
+/// Panics if `corners` cannot be read as `f32` values.
 #[must_use]
-pub fn heatmap_loss(heatmaps: Tensor<4>, targets: Tensor<2>) -> Tensor<1> {
-    let [batch, corners, h, w] = heatmaps.dims();
-    assert_eq!(corners, 4, "expected four corner heat-map channels");
-    let device = heatmaps.device();
-    let target_values: Vec<f32> = targets
-        .clone()
-        .narrow(1, 1, 8)
+pub fn corner_cell_targets(corners: Tensor<2>, h: usize, w: usize) -> CornerCellTargets {
+    let [batch, values] = corners.dims();
+    assert_eq!(values, 8, "expected four x/y corner pairs");
+    let device = corners.device();
+    let values: Vec<f32> = corners
         .into_data()
         .try_into_vec()
         .expect("f32 corner targets");
-    let mut maps = vec![0.0_f32; batch * corners * h * w];
+    let mut indices = Vec::with_capacity(batch * 4);
+    let mut x_offsets = Vec::with_capacity(batch * 4);
+    let mut y_offsets = Vec::with_capacity(batch * 4);
+    let span = HEATMAP_GRID_MAX - HEATMAP_GRID_MIN;
     for sample in 0..batch {
-        for corner in 0..corners {
-            let x = target_values[sample * 8 + corner * 2];
-            let y = target_values[sample * 8 + corner * 2 + 1];
-            let offset = (sample * corners + corner) * h * w;
-            let mut sum = 0.0;
-            for row in 0..h {
-                for col in 0..w {
-                    #[expect(clippy::cast_precision_loss, reason = "heat-map dimensions are small")]
-                    let gx = HEATMAP_GRID_MIN
-                        + (HEATMAP_GRID_MAX - HEATMAP_GRID_MIN) * (col as f32 + 0.5) / w as f32;
-                    #[expect(clippy::cast_precision_loss, reason = "heat-map dimensions are small")]
-                    let gy = HEATMAP_GRID_MIN
-                        + (HEATMAP_GRID_MAX - HEATMAP_GRID_MIN) * (row as f32 + 0.5) / h as f32;
-                    let value = (-((gx - x).powi(2) + (gy - y).powi(2))
-                        / (2.0 * HEATMAP_SIGMA.powi(2)))
-                    .exp();
-                    maps[offset + row * w + col] = value;
-                    sum += value;
-                }
-            }
-            for value in &mut maps[offset..offset + h * w] {
-                *value /= sum;
-            }
+        for corner in 0..4 {
+            let x = values[sample * 8 + corner * 2];
+            let y = values[sample * 8 + corner * 2 + 1];
+            #[expect(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_possible_wrap,
+                clippy::cast_sign_loss,
+                reason = "tiny grid dimensions and explicit clamping make the nearest-cell index bounded and nonnegative"
+            )]
+            let col = (((x - HEATMAP_GRID_MIN) / span * w as f32 - 0.5).round() as isize)
+                .clamp(0, w as isize - 1) as usize;
+            #[expect(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_possible_wrap,
+                clippy::cast_sign_loss,
+                reason = "tiny grid dimensions and explicit clamping make the nearest-cell index bounded and nonnegative"
+            )]
+            let row = (((y - HEATMAP_GRID_MIN) / span * h as f32 - 0.5).round() as isize)
+                .clamp(0, h as isize - 1) as usize;
+            #[expect(clippy::cast_precision_loss, reason = "heat-map dimensions are small")]
+            let center_x = HEATMAP_GRID_MIN + span * (col as f32 + 0.5) / w as f32;
+            #[expect(clippy::cast_precision_loss, reason = "heat-map dimensions are small")]
+            let center_y = HEATMAP_GRID_MIN + span * (row as f32 + 0.5) / h as f32;
+            indices.push(i64::try_from(row * w + col).expect("heat-map index fits i64"));
+            x_offsets.push(x - center_x);
+            y_offsets.push(y - center_y);
         }
     }
-    let target_maps =
-        Tensor::<1>::from_floats(maps.as_slice(), &device).reshape([batch, corners, h * w]);
-    let log_probabilities = log_softmax(heatmaps.reshape([batch, corners, h * w]), 2);
-    let direct = (target_maps.clone() * log_probabilities.clone())
-        .sum_dim(2)
-        .mean_dim(1)
-        .neg()
-        .reshape([batch, 1]);
-    let rotated_target = Tensor::cat(
-        vec![
-            target_maps.clone().narrow(1, 2, 2),
-            target_maps.narrow(1, 0, 2),
-        ],
-        1,
-    );
-    let rotated = (rotated_target * log_probabilities)
-        .sum_dim(2)
-        .mean_dim(1)
-        .neg()
-        .reshape([batch, 1]);
-    let present = targets.narrow(1, 0, 1);
-    let positives = present.clone().sum().clamp_min(1.0);
-    (direct.min_pair(rotated) * present).sum() / positives
+    CornerCellTargets {
+        indices: Tensor::<1, Int>::from_ints(indices.as_slice(), &device).reshape([batch, 4, 1]),
+        x_offsets: Tensor::<1>::from_floats(x_offsets.as_slice(), &device).reshape([batch, 4, 1]),
+        y_offsets: Tensor::<1>::from_floats(y_offsets.as_slice(), &device).reshape([batch, 4, 1]),
+    }
 }
 
-/// Per-sample mean smooth-L1 between two `[batch, 8]` corner tensors →
-/// `[batch, 1]`.
-fn corner_huber(predicted: Tensor<2>, truth: Tensor<2>) -> Tensor<2> {
-    let abs = (predicted - truth).abs();
-    let quadratic = abs.clone().clamp_max(HUBER_DELTA);
-    let huber = quadratic.clone().powi_scalar(2).mul_scalar(0.5)
-        + (abs - quadratic).mul_scalar(HUBER_DELTA);
-    huber.mean_dim(1)
+/// Hard target-cell cross-entropy with a per-sample 180° assignment.
+///
+/// This standalone component chooses the assignment from its own cell losses;
+/// [`detection_loss_breakdown`] instead shares the coordinate-based assignment
+/// with every spatial component.
+#[must_use]
+pub fn heatmap_loss(heatmaps: Tensor<4>, targets: Tensor<2>) -> Tensor<1> {
+    let present = targets.clone().narrow(1, 0, 1);
+    let truth = targets.narrow(1, 1, 8);
+    let [_, _, h, w] = heatmaps.dims();
+    let direct =
+        heatmap_loss_per_sample(heatmaps.clone(), &corner_cell_targets(truth.clone(), h, w));
+    let rotated = heatmap_loss_per_sample(heatmaps, &corner_cell_targets(rotate_180(truth), h, w));
+    masked_mean(direct.min_pair(rotated), present)
+}
+
+fn assigned_heatmap_loss(
+    heatmaps: Tensor<4>,
+    cells: &CornerCellTargets,
+    present: Tensor<2>,
+) -> Tensor<1> {
+    masked_mean(heatmap_loss_per_sample(heatmaps, cells), present)
+}
+
+fn heatmap_loss_per_sample(heatmaps: Tensor<4>, cells: &CornerCellTargets) -> Tensor<2> {
+    let [batch, corners, h, w] = heatmaps.dims();
+    assert_eq!(corners, 4, "expected four corner heat-map channels");
+    log_softmax(heatmaps.reshape([batch, corners, h * w]), 2)
+        .gather(2, cells.indices.clone())
+        .neg()
+        .mean_dim(1)
+        .reshape([batch, 1])
+}
+
+fn offset_loss(
+    x_offsets: Tensor<4>,
+    y_offsets: Tensor<4>,
+    cells: &CornerCellTargets,
+    present: Tensor<2>,
+) -> Tensor<1> {
+    let [batch, corners, h, w] = x_offsets.dims();
+    #[expect(clippy::cast_precision_loss, reason = "heat-map dimensions are small")]
+    let half_x = (HEATMAP_GRID_MAX - HEATMAP_GRID_MIN) / (2 * w) as f32;
+    #[expect(clippy::cast_precision_loss, reason = "heat-map dimensions are small")]
+    let half_y = (HEATMAP_GRID_MAX - HEATMAP_GRID_MIN) / (2 * h) as f32;
+    let x = x_offsets
+        .reshape([batch, corners, h * w])
+        .gather(2, cells.indices.clone())
+        .tanh()
+        .mul_scalar(half_x);
+    let y = y_offsets
+        .reshape([batch, corners, h * w])
+        .gather(2, cells.indices.clone())
+        .tanh()
+        .mul_scalar(half_y);
+    let per_sample = (charbonnier(x - cells.x_offsets.clone())
+        + charbonnier(y - cells.y_offsets.clone()))
+    .mean_dim(1)
+    .reshape([batch, 1]);
+    masked_mean(per_sample, present)
+}
+
+/// Translation-invariant loss on the four directed quadrilateral edges.
+#[must_use]
+pub fn edge_vector_loss(predicted: Tensor<2>, truth: Tensor<2>, present: Tensor<2>) -> Tensor<1> {
+    let edges = |corners: Tensor<2>| {
+        let points = corners.reshape([-1, 4, 2]);
+        let next = Tensor::cat(
+            vec![
+                points.clone().narrow(1, 1, 3),
+                points.clone().narrow(1, 0, 1),
+            ],
+            1,
+        );
+        (next - points).flatten::<2>(1, 2)
+    };
+    masked_mean(
+        charbonnier(edges(predicted) - edges(truth)).mean_dim(1),
+        present,
+    )
+}
+
+/// Relative width/height loss that penalizes uniformly contracted predictions.
+#[must_use]
+pub fn relative_size_loss(predicted: Tensor<2>, truth: Tensor<2>, present: Tensor<2>) -> Tensor<1> {
+    let sizes = |corners: Tensor<2>| {
+        let points = corners.reshape([-1, 4, 2]);
+        let edge_length = |a: usize, b: usize| {
+            (points.clone().narrow(1, b, 1) - points.clone().narrow(1, a, 1))
+                .powi_scalar(2)
+                .sum_dim(2)
+                .add_scalar(CHARBONNIER_EPSILON * CHARBONNIER_EPSILON)
+                .sqrt()
+        };
+        let width = (edge_length(0, 1) + edge_length(3, 2)).mul_scalar(0.5);
+        let height = (edge_length(1, 2) + edge_length(0, 3)).mul_scalar(0.5);
+        Tensor::cat(vec![width, height], 2).reshape([-1, 2])
+    };
+    let target_size = sizes(truth);
+    let relative = (sizes(predicted) - target_size.clone()) / target_size.clamp_min(1.0e-3);
+    masked_mean(charbonnier(relative).mean_dim(1), present)
+}
+
+fn charbonnier<const D: usize>(error: Tensor<D>) -> Tensor<D> {
+    error
+        .powi_scalar(2)
+        .add_scalar(CHARBONNIER_EPSILON * CHARBONNIER_EPSILON)
+        .sqrt()
+        .sub_scalar(CHARBONNIER_EPSILON)
+}
+
+fn masked_mean(values: Tensor<2>, present: Tensor<2>) -> Tensor<1> {
+    let positives = present.clone().sum().clamp_min(1.0);
+    (values * present).sum() / positives
 }
 
 /// Reorder `[batch, 8]` corners `TL, TR, BR, BL` into `BR, BL, TL, TR` — the
