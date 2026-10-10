@@ -12,20 +12,20 @@
 //! ```text
 //! trunk:    [conv3×3 → BatchNorm → ReLU → maxpool2] × 5   (channels 16, 32, 64, 128, 128)
 //! presence: global average pool of the last stage → Linear(128 → 1)
-//! corners:  stage 0 (stride 2, 64×64×16) ⊕ stage 1 upsampled ×2
-//!           ⊕ stage 2 upsampled ×4 → conv3×3 → BatchNorm → ReLU → conv1×1
-//!           → 4 heat-maps (64×64) → soft-argmax
+//! corners:  all five stages → per-stage 1×1 projection → upsample to stride 2
+//!           → sum → [conv3×3 → BatchNorm → ReLU] × 2 → conv1×1
+//!           → 4 cell-logit + 4 x-offset + 4 y-offset maps (64×64)
 //! ```
 //!
 //! Corners are **not** regressed by a fully connected layer: that discards
-//! spatial precision and plateaus around 10 % of the frame.  Instead each
-//! corner gets a heat-map over a genuine stride-2 grid and its coordinate is
-//! the soft-argmax (softmax-weighted mean of the cell centres), which is
-//! continuous and localises to a fraction of a cell.  The heat-map input
-//! merges stage 0's fine edges with stages 1 and 2 upsampled from strides 4
-//! and 8 to provide progressively wider context, U-Net style.  The grid spans
-//! `[-0.1, 1.1]` so
-//! corners slightly outside the frame stay representable.
+//! spatial precision and plateaus around 10 % of the frame. Instead, each
+//! corner gets a cell-logit map over a genuine stride-2 grid plus local x/y
+//! offsets. All five trunk stages contribute through equal-width lateral
+//! projections, FPN-style, so fine edges and global context reach the head.
+//! Inference selects the hard maximum-logit cell and applies only that cell's
+//! `tanh`-bounded subcell offsets. Diffuse secondary probability mass therefore
+//! cannot pull corners inward. The grid spans `[-0.1, 1.1]`, so corners slightly
+//! outside the frame stay representable.
 //!
 //! # Output
 //!
@@ -54,10 +54,11 @@ pub const OUTPUT_SIZE: usize = 9;
 /// Channel width of each convolutional stage.
 const STAGE_CHANNELS: [usize; 5] = [16, 32, 64, 128, 128];
 
-/// Trunk stages (0-based) feeding the corner head. Stage 0 sets the stride-2
-/// heat-map resolution; stages 1 and 2 contribute deeper spatial context.
-const FINE_STAGE: usize = 0;
-const CONTEXT_STAGES: [usize; 2] = [1, 2];
+/// Number of trunk stages fused into the corner head.
+pub const CORNER_FUSION_STAGES: usize = STAGE_CHANNELS.len();
+
+/// Number of raw channels emitted by the corner head.
+pub const CORNER_HEAD_CHANNELS: usize = 12;
 
 /// Stride of the heat-map grid relative to the input.
 const HEATMAP_STRIDE: usize = 2;
@@ -77,7 +78,7 @@ pub struct DetectorConfig {
     /// 32 (five 2× pooling stages).
     #[config(default = 128)]
     pub input_size: usize,
-    /// Channel width of the corner head's hidden convolution.
+    /// Common width of every lateral projection and hidden corner-head layer.
     #[config(default = 64)]
     pub hidden: usize,
 }
@@ -117,8 +118,11 @@ impl ConvBlock {
 pub struct Detector {
     blocks: Vec<ConvBlock>,
     presence: Linear,
-    corner_conv: Conv2d,
-    corner_norm: BatchNorm,
+    corner_projections: Vec<Conv2d>,
+    corner_conv1: Conv2d,
+    corner_norm1: BatchNorm,
+    corner_conv2: Conv2d,
+    corner_norm2: BatchNorm,
     corner_out: Conv2d,
     activation: Relu,
     input_size: usize,
@@ -143,23 +147,25 @@ impl DetectorConfig {
             blocks.push(ConvBlock::new(in_channels, out_channels, device));
             in_channels = out_channels;
         }
+        let corner_projections = STAGE_CHANNELS
+            .iter()
+            .map(|&channels| Conv2dConfig::new([channels, self.hidden], [1, 1]).init(device))
+            .collect();
+        let corner_conv = || {
+            Conv2dConfig::new([self.hidden, self.hidden], [3, 3])
+                .with_padding(PaddingConfig2d::Same)
+                .with_bias(false)
+                .init(device)
+        };
         Detector {
             blocks,
             presence: LinearConfig::new(in_channels, 1).init(device),
-            corner_conv: Conv2dConfig::new(
-                [
-                    STAGE_CHANNELS[FINE_STAGE]
-                        + STAGE_CHANNELS[CONTEXT_STAGES[0]]
-                        + STAGE_CHANNELS[CONTEXT_STAGES[1]],
-                    self.hidden,
-                ],
-                [3, 3],
-            )
-            .with_padding(PaddingConfig2d::Same)
-            .with_bias(false)
-            .init(device),
-            corner_norm: BatchNormConfig::new(self.hidden).init(device),
-            corner_out: Conv2dConfig::new([self.hidden, 4], [1, 1]).init(device),
+            corner_projections,
+            corner_conv1: corner_conv(),
+            corner_norm1: BatchNormConfig::new(self.hidden).init(device),
+            corner_conv2: corner_conv(),
+            corner_norm2: BatchNormConfig::new(self.hidden).init(device),
+            corner_out: Conv2dConfig::new([self.hidden, CORNER_HEAD_CHANNELS], [1, 1]).init(device),
             activation: Relu::new(),
             input_size: self.input_size,
         }
@@ -168,14 +174,20 @@ impl DetectorConfig {
 
 /// Outputs produced by one detector trunk pass.
 ///
-/// `output` preserves the public `[batch, 9]` inference representation, while
-/// `heatmaps` exposes `[batch, 4, input_size / 2, input_size / 2]` logits for
-/// direct spatial supervision during training.
+/// `output` preserves the public `[batch, 9]` inference representation. The
+/// remaining tensors expose the stride-2 head outputs for training and
+/// diagnostics.
 pub struct DetectorOutput {
-    /// Presence logit followed by eight soft-argmax corner coordinates.
+    /// Presence logit followed by eight decoded corner coordinates.
     pub output: Tensor<2>,
-    /// Raw stride-2 corner heat-map logits.
+    /// Raw stride-2 corner cell logits, channels `0..4` of [`Self::corner_raw`].
     pub heatmaps: Tensor<4>,
+    /// Raw stride-2 x-offset maps, channels `4..8` of [`Self::corner_raw`].
+    pub x_offsets: Tensor<4>,
+    /// Raw stride-2 y-offset maps, channels `8..12` of [`Self::corner_raw`].
+    pub y_offsets: Tensor<4>,
+    /// All 12 raw corner-head channels.
+    pub corner_raw: Tensor<4>,
 }
 
 impl Detector {
@@ -207,40 +219,48 @@ impl Detector {
     #[must_use]
     pub fn forward_with_heatmaps(&self, images: Tensor<4>) -> DetectorOutput {
         let mut x = images;
-        let mut features = Vec::with_capacity(3);
-        for (i, block) in self.blocks.iter().enumerate() {
+        let mut features = Vec::with_capacity(CORNER_FUSION_STAGES);
+        for block in &self.blocks {
             x = block.forward(x);
-            if i <= CONTEXT_STAGES[1] {
-                features.push(x.clone());
-            }
+            features.push(x.clone());
         }
         let pooled = x.mean_dim(3).mean_dim(2).flatten::<2>(1, 3);
         let logit = self.presence.forward(pooled);
-        let heatmaps = self.heatmaps(features);
-        let coords = soft_argmax(heatmaps.clone());
+        let corner_raw = self.corner_head(features);
+        let heatmaps = corner_raw.clone().narrow(1, 0, 4);
+        let x_offsets = corner_raw.clone().narrow(1, 4, 4);
+        let y_offsets = corner_raw.clone().narrow(1, 8, 4);
+        let coords = decode_corners(heatmaps.clone(), x_offsets.clone(), y_offsets.clone());
         DetectorOutput {
             output: Tensor::cat(vec![logit, coords], 1),
             heatmaps,
+            x_offsets,
+            y_offsets,
+            corner_raw,
         }
     }
 
-    /// Build raw stride-2 corner heat-maps from the first three trunk stages.
-    fn heatmaps(&self, features: Vec<Tensor<4>>) -> Tensor<4> {
+    /// Build the raw stride-2 corner maps from all five trunk stages.
+    fn corner_head(&self, features: Vec<Tensor<4>>) -> Tensor<4> {
+        debug_assert_eq!(features.len(), CORNER_FUSION_STAGES);
         let [_, _, h, w] = features[0].dims();
-        let mut fused = Vec::with_capacity(features.len());
-        for (i, feature) in features.into_iter().enumerate() {
-            if i == FINE_STAGE {
-                fused.push(feature);
-            } else {
-                fused.push(interpolate(
-                    feature,
-                    InterpolateOptions::new(InterpolateMode::Nearest).with_output_size([h, w]),
-                ));
-            }
+        let mut projected = features
+            .into_iter()
+            .zip(&self.corner_projections)
+            .map(|(feature, projection)| projection.forward(feature));
+        let mut fused = projected.next().expect("the trunk has stages");
+        for feature in projected {
+            let upsampled = interpolate(
+                feature,
+                InterpolateOptions::new(InterpolateMode::Bilinear).with_output_size([h, w]),
+            );
+            fused = fused + upsampled;
         }
-        let x = Tensor::cat(fused, 1);
-        let x = self.corner_conv.forward(x);
-        let x = self.corner_norm.forward(x);
+        let x = self.corner_conv1.forward(fused);
+        let x = self.corner_norm1.forward(x);
+        let x = self.activation.forward(x);
+        let x = self.corner_conv2.forward(x);
+        let x = self.corner_norm2.forward(x);
         let x = self.activation.forward(x);
         self.corner_out.forward(x)
     }
@@ -269,12 +289,71 @@ pub fn image_tensor(pixels: &[u8], size: usize, device: &Device) -> Tensor<3> {
     Tensor::<1>::from_floats(floats.as_slice(), device).reshape([1, size, size])
 }
 
+/// Decode corner maps with a hard cell argmax and bounded local offsets.
+///
+/// All inputs have shape `[batch, 4, h, w]`. For each corner channel, the
+/// maximum-logit cell is selected independently, then the corresponding raw
+/// x/y offsets are passed through `tanh` and applied within half a cell. The
+/// result is `[batch, 8]` in `x0 y0 … x3 y3` order on the grid from
+/// [`HEATMAP_GRID_MIN`] to [`HEATMAP_GRID_MAX`].
+#[must_use]
+pub fn decode_corners(
+    heatmaps: Tensor<4>,
+    x_offsets: Tensor<4>,
+    y_offsets: Tensor<4>,
+) -> Tensor<2> {
+    let [batch, corners, h, w] = heatmaps.dims();
+    let device = heatmaps.device();
+    let cells = h * w;
+    let selected = heatmaps.reshape([batch, corners, cells]).argmax(2);
+
+    let centre = |i: usize, n: usize| {
+        #[expect(clippy::cast_precision_loss, reason = "grid sizes are tiny integers")]
+        let t = (i as f32 + 0.5) / n as f32;
+        HEATMAP_GRID_MIN + (HEATMAP_GRID_MAX - HEATMAP_GRID_MIN) * t
+    };
+    let mut xs = Vec::with_capacity(cells);
+    let mut ys = Vec::with_capacity(cells);
+    for row in 0..h {
+        for col in 0..w {
+            xs.push(centre(col, w));
+            ys.push(centre(row, h));
+        }
+    }
+    let grid_x = Tensor::<1>::from_floats(xs.as_slice(), &device)
+        .reshape([1, 1, cells])
+        .repeat_dim(0, batch)
+        .repeat_dim(1, corners);
+    let grid_y = Tensor::<1>::from_floats(ys.as_slice(), &device)
+        .reshape([1, 1, cells])
+        .repeat_dim(0, batch)
+        .repeat_dim(1, corners);
+    #[expect(clippy::cast_precision_loss, reason = "heat-map dimensions are small")]
+    let half_cell_x = (HEATMAP_GRID_MAX - HEATMAP_GRID_MIN) / (2 * w) as f32;
+    #[expect(clippy::cast_precision_loss, reason = "heat-map dimensions are small")]
+    let half_cell_y = (HEATMAP_GRID_MAX - HEATMAP_GRID_MIN) / (2 * h) as f32;
+    let x = grid_x.gather(2, selected.clone())
+        + x_offsets
+            .reshape([batch, corners, cells])
+            .gather(2, selected.clone())
+            .tanh()
+            .mul_scalar(half_cell_x);
+    let y = grid_y.gather(2, selected.clone())
+        + y_offsets
+            .reshape([batch, corners, cells])
+            .gather(2, selected)
+            .tanh()
+            .mul_scalar(half_cell_y);
+    Tensor::cat(vec![x, y], 2).reshape([batch, corners * 2])
+}
+
 /// Soft-argmax of `[batch, 4, h, w]` heat-maps → `[batch, 8]` coordinates
 /// `x0 y0 … x3 y3` in normalised units.
 ///
 /// Each heat-map is soft-maxed over its `h·w` cells and the coordinate is the
 /// probability-weighted mean of the cell centres, laid out on a grid spanning
-/// `[GRID_MIN, GRID_MAX]` in both directions.
+/// `[GRID_MIN, GRID_MAX]` in both directions. Detector inference uses
+/// [`decode_corners`] instead so secondary mass cannot move a corner.
 #[must_use]
 pub fn soft_argmax(heatmaps: Tensor<4>) -> Tensor<2> {
     let [batch, corners, h, w] = heatmaps.dims();
