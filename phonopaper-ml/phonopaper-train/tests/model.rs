@@ -3,10 +3,13 @@
 use burn::prelude::*;
 use burn::tensor::Device;
 use phonopaper_train::model::{
-    CORNER_FUSION_STAGES, CORNER_HEAD_CHANNELS, Detection, DetectorConfig, OUTPUT_SIZE,
-    decode_corners, decode_output, soft_argmax,
+    CORNER_FUSION_STAGES, CORNER_HEAD_CHANNELS, Detection, DetectorConfig, DetectorOutput,
+    OUTPUT_SIZE, decode_corners, decode_output, soft_argmax,
 };
-use phonopaper_train::training::heatmap_loss;
+use phonopaper_train::training::{
+    assign_corner_targets, corner_cell_targets, detection_loss_breakdown, edge_vector_loss,
+    heatmap_loss, relative_size_loss, rotate_180,
+};
 
 #[test]
 fn forward_produces_nine_outputs_per_image() {
@@ -107,6 +110,146 @@ fn negatives_mask_heatmaps_and_all_negative_batch_is_safe() {
         heatmap_loss(Tensor::<4>::zeros([2, 4, 16, 16], &device), targets).into_scalar();
     assert!(loss.is_finite());
     assert_eq!(loss, 0.0);
+}
+
+fn corners_tensor(corners: [f32; 8], device: &Device) -> Tensor<2> {
+    Tensor::<1>::from_floats(corners.as_slice(), device).reshape([1, 8])
+}
+
+fn present(device: &Device) -> Tensor<2> {
+    Tensor::<2>::ones([1, 1], device)
+}
+
+fn scalar(tensor: Tensor<1>) -> f32 {
+    tensor.into_scalar()
+}
+
+#[test]
+fn shared_assignment_selects_rotated_equivalent_target() {
+    let device = Device::flex();
+    let truth = corner_targets(&device).narrow(1, 1, 8);
+    let rotated = rotate_180(truth.clone());
+    let assigned: Vec<f32> = assign_corner_targets(rotated.clone(), truth)
+        .into_data()
+        .try_into_vec()
+        .unwrap();
+    let expected: Vec<f32> = rotated.into_data().try_into_vec().unwrap();
+    assert_eq!(assigned, expected);
+}
+
+#[test]
+fn corner_cell_targets_encode_nearest_cell_and_exact_offset() {
+    let device = Device::flex();
+    let corners = corners_tensor([0.23, 0.37, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8], &device);
+    let cells = corner_cell_targets(corners, 4, 4);
+    let indices: Vec<i32> = cells.indices.into_data().try_into_vec().unwrap();
+    let xs: Vec<f32> = cells.x_offsets.into_data().try_into_vec().unwrap();
+    let ys: Vec<f32> = cells.y_offsets.into_data().try_into_vec().unwrap();
+    assert_eq!(indices[0], 5);
+    assert!((xs[0] + 0.12).abs() < 1e-6, "x offset = {}", xs[0]);
+    assert!((ys[0] - 0.02).abs() < 1e-6, "y offset = {}", ys[0]);
+}
+
+#[test]
+fn edge_loss_is_translation_invariant_and_rejects_contraction() {
+    let device = Device::flex();
+    let truth = corners_tensor([0.1, 0.2, 0.9, 0.2, 0.9, 0.8, 0.1, 0.8], &device);
+    let translated = corners_tensor([0.2, 0.1, 1.0, 0.1, 1.0, 0.7, 0.2, 0.7], &device);
+    let contracted = corners_tensor([0.2, 0.275, 0.8, 0.275, 0.8, 0.725, 0.2, 0.725], &device);
+    let translated_loss = scalar(edge_vector_loss(
+        translated,
+        truth.clone(),
+        present(&device),
+    ));
+    let contracted_loss = scalar(edge_vector_loss(contracted, truth, present(&device)));
+    assert!(translated_loss < 1e-6, "translated={translated_loss}");
+    assert!(contracted_loss > 0.05, "contracted={contracted_loss}");
+}
+
+#[test]
+fn relative_size_loss_favors_exact_over_contracted_geometry() {
+    let device = Device::flex();
+    let truth = corners_tensor([0.1, 0.2, 0.9, 0.2, 0.9, 0.8, 0.1, 0.8], &device);
+    let contracted = corners_tensor([0.2, 0.275, 0.8, 0.275, 0.8, 0.725, 0.2, 0.725], &device);
+    let exact = scalar(relative_size_loss(
+        truth.clone(),
+        truth.clone(),
+        present(&device),
+    ));
+    let contracted = scalar(relative_size_loss(contracted, truth, present(&device)));
+    assert!(exact < 1e-6);
+    assert!(contracted > 0.2, "contracted={contracted}");
+}
+
+fn prediction_for(corners: [f32; 8], target: [f32; 8], device: &Device) -> DetectorOutput {
+    let side = 4;
+    let cells = corner_cell_targets(corners_tensor(target, device), side, side);
+    let indices: Vec<i32> = cells.indices.clone().into_data().try_into_vec().unwrap();
+    let target_x: Vec<f32> = cells.x_offsets.into_data().try_into_vec().unwrap();
+    let target_y: Vec<f32> = cells.y_offsets.into_data().try_into_vec().unwrap();
+    let mut heatmaps = vec![-8.0_f32; 4 * side * side];
+    let mut x_offsets = vec![0.0_f32; 4 * side * side];
+    let mut y_offsets = vec![0.0_f32; 4 * side * side];
+    let half_cell = 0.15_f32;
+    for corner in 0..4 {
+        let index = usize::try_from(indices[corner]).unwrap();
+        heatmaps[corner * side * side + index] = 8.0;
+        x_offsets[corner * side * side + index] = (target_x[corner] / half_cell).atanh();
+        y_offsets[corner * side * side + index] = (target_y[corner] / half_cell).atanh();
+    }
+    let heatmaps =
+        Tensor::<1>::from_floats(heatmaps.as_slice(), device).reshape([1, 4, side, side]);
+    let x_offsets =
+        Tensor::<1>::from_floats(x_offsets.as_slice(), device).reshape([1, 4, side, side]);
+    let y_offsets =
+        Tensor::<1>::from_floats(y_offsets.as_slice(), device).reshape([1, 4, side, side]);
+    let coords = corners_tensor(corners, device);
+    let output = Tensor::cat(vec![Tensor::<2>::from_floats([[8.0]], device), coords], 1);
+    let corner_raw = Tensor::cat(
+        vec![heatmaps.clone(), x_offsets.clone(), y_offsets.clone()],
+        1,
+    );
+    DetectorOutput {
+        output,
+        heatmaps,
+        x_offsets,
+        y_offsets,
+        corner_raw,
+    }
+}
+
+#[test]
+fn total_loss_favors_correct_geometry_over_contraction() {
+    let device = Device::flex();
+    let target = [0.12, 0.22, 0.88, 0.22, 0.88, 0.78, 0.12, 0.78];
+    let contracted = [0.22, 0.29, 0.78, 0.29, 0.78, 0.71, 0.22, 0.71];
+    let targets = Tensor::<1>::from_floats(
+        [1.0, 0.12, 0.22, 0.88, 0.22, 0.88, 0.78, 0.12, 0.78].as_slice(),
+        &device,
+    )
+    .reshape([1, 9]);
+    let exact = detection_loss_breakdown(prediction_for(target, target, &device), targets.clone());
+    let wrong = detection_loss_breakdown(prediction_for(contracted, target, &device), targets);
+    assert!(scalar(exact.total) < scalar(wrong.total));
+}
+
+#[test]
+fn all_negative_breakdown_has_finite_zero_spatial_terms() {
+    let device = Device::flex();
+    let prediction = prediction_for([0.0; 8], [0.0; 8], &device);
+    let losses = detection_loss_breakdown(prediction, Tensor::<2>::zeros([1, 9], &device));
+    for loss in [
+        losses.heatmap,
+        losses.offset,
+        losses.coordinate,
+        losses.edge,
+        losses.size,
+    ] {
+        let value = scalar(loss);
+        assert!(value.is_finite());
+        assert_eq!(value, 0.0);
+    }
+    assert!(scalar(losses.total).is_finite());
 }
 
 #[test]

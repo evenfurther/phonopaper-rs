@@ -27,9 +27,10 @@ individual commands:
 # both validation and training splits. Defaults to the portable CPU backend.
 ./scripts/train-and-eval.sh
 
-# Typical GPU run and environment overrides:
+# Typical fresh GPU run; use a new artifact directory because old checkpoints
+# are architecture-incompatible:
 BACKEND=wgpu DATASET_COUNT=200000 BATCH_SIZE=16 EPOCHS=50 \
-    ARTIFACTS=artifacts-v2 ./scripts/train-and-eval.sh
+    ARTIFACTS=artifacts-fpn-offset-v1 ./scripts/train-and-eval.sh
 
 # After reviewing metrics, safely stage and test all three embedded artifacts:
 ARTIFACTS=artifacts-v2 ./scripts/embed-model.sh
@@ -43,9 +44,11 @@ present. A missing, malformed, v1, or differently scaled dataset is removed
 and deterministically rebuilt instead of being silently reused.
 
 > **Current embedded-model status:** the checked-in application model is
-> **not loadable with the current stride-2 heat-map architecture** until a new
-> model is trained and embedded with `scripts/embed-model.sh`. Do not ship or
-> run the Android detector from this worktree before completing that step.
+> **not loadable with the current all-stage FPN/offset architecture** until a
+> new model is trained from scratch and embedded with `scripts/embed-model.sh`.
+> Old checkpoints are also shape-incompatible; use a new artifact directory.
+> Do not ship or run the Android detector from this worktree before completing
+> that step.
 
 ---
 
@@ -268,22 +271,25 @@ input     [1 × 128 × 128] (grayscale, values in [0, 1])
 trunk     5 × (conv 3×3 → BatchNorm → ReLU → maxpool 2)
           channels 16, 32, 64, 128, 128
 presence  global average pool of final stride-32 stage → Linear(128 → 1 logit)
-corners   stride-2 stage 0 (16 × 64 × 64)
-          ⊕ stage 1 (32 × 32 × 32) nearest-upsampled ×2
-          ⊕ stage 2 (64 × 16 × 16) nearest-upsampled ×4
-          → conv 3×3 (64 channels) → BatchNorm → ReLU → conv 1×1
-          → 4 heat-maps (64 × 64) → soft-argmax
+corners   all five stages (strides 2, 4, 8, 16 and 32)
+          → separate 1×1 projections to 64 channels
+          → bilinear upsample to 64 × 64 and sum
+          → 2 × (conv 3×3 → BatchNorm → ReLU) → conv 1×1
+          → 4 cell-logit + 4 x-offset + 4 y-offset maps (64 × 64)
 ```
 
-Corners are localised with **heat-maps + soft-argmax**, not a fully connected
-regressor. Each coordinate is the probability-weighted mean of one heat-map,
-so it remains continuous while preserving fine spatial evidence. The U-Net-like
-fusion combines stride-2 edges with stride-4 and stride-8 context. Its
-64×64 maps consume substantially more training activation memory than the old
-stride-4 head, so automation deliberately defaults to batches of 16 locally,
-32 on A40, and 64 on the larger cluster GPUs. Increase these only after
-measuring peak memory. The coordinate grid spans `[-0.1, 1.1]`, preserving
-labels for corners just outside the frame.
+Corners are localised with **cell classification plus subcell offsets**, not a
+fully connected regressor or global soft-argmax. Each corner independently
+selects its maximum-logit cell, then applies that cell's `tanh`-bounded x/y
+offsets. Diffuse or multimodal probability away from the winning cell therefore
+cannot pull predictions toward the image centre. All five trunk stages provide
+both fine edges and nearly full-frame context through an FPN-style head.
+
+The 64×64 maps and five projected feature levels consume substantially more
+training activation memory than the old corner head, so automation deliberately
+defaults to batches of 16 locally, 32 on A40, and 64 on larger cluster GPUs.
+Increase these only after measuring peak memory. The coordinate grid spans
+`[-0.1, 1.1]`, preserving labels for corners just outside the frame.
 
 Output rows are `[presence logit, x0, y0, x1, y1, x2, y2, x3, y3]`; corner
 coordinates are divided by the input side, and may legitimately fall outside
@@ -293,15 +299,20 @@ The objective is:
 
 ```text
 presence BCE
-+ 1 × normalized-Gaussian heat-map cross-entropy
-+ 20 × smooth-L1 decoded-coordinate loss
++ 1 × nearest-cell cross-entropy
++ 2 × target-cell x/y offset Charbonnier loss
++ 5 × decoded-coordinate Charbonnier loss
++ 2 × directed edge-vector Charbonnier loss
++ 1 × relative width/height loss
 ```
 
-Spatial terms are averaged over positive samples only and take the minimum of
-the labelled ordering and its 180°-rotated equivalent. Heat-map targets use
-σ = 0.02 in normalized coordinates (2.56 px at 128 px). Smooth-L1 uses
-δ = 0.01 (≈1.3 px), retaining useful localization gradients below the older
-δ = 0.05 plateau. An all-negative batch contributes finite zero spatial loss.
+One decoded-coordinate comparison chooses the labelled ordering or its
+180°-rotated equivalent per sample; every spatial term then uses that same
+assignment. Cell classification selects the nearest grid cell, offsets retain
+continuous coordinates, edge vectors penalize distorted geometry without
+penalizing translation, and relative size directly opposes systematic box
+contraction or expansion. Spatial terms are averaged over positive samples
+only; an all-negative batch contributes finite zero spatial loss.
 
 The learning rate follows a **cosine decay** from `--learning-rate` to
 `--learning-rate × --min-lr-fraction` (default 0.05) over `--epochs`; the
@@ -411,7 +422,12 @@ sheet orderings has lower total corner error. IoU and dimensions describe the
 quadrilateral geometry and are unchanged by that equivalent reordering.
 Comparing the two splits tells **under-fitting** (both poor → train longer /
 stronger signal) from **over-fitting** (train good, valid poor → more data).
-`--epoch N` evaluates the checkpoint of epoch `N` (it must still exist in
+Before embedding a model, require the reviewed validation and real-image suite
+to meet project needs. For clean digital patterns, aim for quadrilateral IoU
+above 97%, corner errors around 1–2 input pixels, and width/height scale bias
+near zero; aggregate synthetic metrics must also have a controlled p95 and no
+systematic scale bias. `--epoch N` evaluates the checkpoint of epoch `N` (it
+must still exist in
 `artifacts/checkpoint/`) instead of the exported `model.bpk`, so epochs can
 be compared without re-exporting.
 
