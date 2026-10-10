@@ -14,8 +14,14 @@ def releaseSigningValues = [
     releaseKeyPassword,
 ]
 def releaseSigningConfigured = releaseSigningValues.every { it }
+def androidSigningMode = System.getenv('ANDROID_SIGNING_MODE') ?: 'debug'
 
-if (releaseSigningValues.any { it } && !releaseSigningConfigured) {
+if (!(androidSigningMode in ['debug', 'unsigned', 'release'])) {
+    throw new GradleException(
+        "ANDROID_SIGNING_MODE must be 'debug', 'unsigned', or 'release', got '${androidSigningMode}'."
+    )
+}
+if (androidSigningMode == 'release' && !releaseSigningConfigured) {
     throw new GradleException(
         'ANDROID_KEYSTORE_PATH, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ' +
             'and ANDROID_KEY_PASSWORD must all be set for release signing.'
@@ -66,7 +72,13 @@ android {
         }
         release {
             minifyEnabled false
-            signingConfig releaseSigningConfigured ? signingConfigs.release : signingConfigs.debug
+            if (androidSigningMode == 'release') {
+                signingConfig signingConfigs.release
+            } else if (androidSigningMode == 'debug') {
+                signingConfig signingConfigs.debug
+            } else {
+                signingConfig null
+            }
         }
     }
 
