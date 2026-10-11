@@ -140,17 +140,18 @@ jobs:
             "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
           )
           printf '%s\n' "$certificate_output"
-          signer=$(
+          signers=$(
             sed -nE \
-              's/^Signer #[0-9]+ certificate SHA-256 digest:[[:space:]]*//p' \
+              's/^.*certificate SHA-256 digest:[[:space:]]*//p' \
               <<<"$certificate_output" \
-              | head -n 1 \
-              | tr -d ':[:space:]' \
-              | tr '[:upper:]' '[:lower:]'
+              | tr -d ': \t\r' \
+              | tr '[:upper:]' '[:lower:]' \
+              | sort -u
           )
-          if [[ "$signer" != "$EXPECTED_SIGNER_SHA256" ]]; then
-            echo "Unexpected signing certificate: '$signer'" >&2
-            echo "Expected signing certificate:   '$EXPECTED_SIGNER_SHA256'" >&2
+          signer_count=$(grep -c . <<<"$signers")
+          if [[ "$signer_count" -ne 1 || "$signers" != "$EXPECTED_SIGNER_SHA256" ]]; then
+            echo "Unexpected signing certificate(s): '$signers'" >&2
+            echo "Expected signing certificate:      '$EXPECTED_SIGNER_SHA256'" >&2
             exit 1
           fi
           "$BUILD_TOOLS/aapt" dump badging "$APK" \
