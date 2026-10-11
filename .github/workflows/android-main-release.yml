@@ -168,13 +168,15 @@ jobs:
           HEAD_SHA: ${{ github.sha }}
           MERGE_RUN_ID: ${{ steps.merge-run.outputs.run_id }}
         run: |
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+          if gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $RELEASE_TAG already exists; refusing to replace an immutable snapshot." >&2
             exit 1
           fi
           gh release create "$RELEASE_TAG" \
             phonopaper-android-main.apk \
             phonopaper-android-main.apk.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
             --prerelease \
             --target "$HEAD_SHA" \
             --title "Android main build $ANDROID_VERSION_CODE" \
