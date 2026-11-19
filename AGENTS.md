@@ -248,19 +248,27 @@ toolchain or dependency upgrades change LLVM's region accounting even without
 source edits; when that happens, refresh the table from the command output so
 the documented baselines stay in sync with the repository.
 
+The current numbers were measured with `cargo-llvm-cov` 0.9.1.  Version 0.8.5
+and older fail with `failed to collect object files: not found object files`
+because Cargo now places test binaries under
+`target/llvm-cov-target/debug/build/<pkg>/<hash>/out/` (new build-dir
+layout), which those versions do not search; upgrade with
+`cargo install cargo-llvm-cov --locked`.
+
 | File | Regions | Functions | Lines |
 |---|---|---|---|
-| `audio.rs`           | 86.19 % |  66.67 % |  79.07 % |
-| `decode/image.rs`    | 98.39 % | 100.00 % | 100.00 % |
-| `decode/markers.rs`  | 98.87 % | 100.00 % |  96.33 % |
-| `decode/synth.rs`    | 68.42 % |  88.89 % |  68.42 % |
-| `decode/wav.rs`      | 81.51 % |  75.00 % |  88.24 % |
-| `encode.rs`          | 97.48 % | 100.00 % |  99.00 % |
+| `audio.rs`           | 77.48 % |  66.67 % |  76.61 % |
+| `decode/image.rs`    | 97.78 % | 100.00 % | 100.00 % |
+| `decode/markers.rs`  | 98.48 % | 100.00 % |  96.40 % |
+| `decode/refine.rs`   | 91.92 % | 100.00 % |  96.05 % |
+| `decode/synth.rs`    | 97.32 % | 100.00 % |  96.92 % |
+| `decode/wav.rs`      | 69.44 % |  75.00 % |  88.24 % |
+| `encode.rs`          | 97.66 % | 100.00 % |  99.34 % |
 | `format.rs`          |100.00 % | 100.00 % | 100.00 % |
 | `render.rs`          |100.00 % | 100.00 % | 100.00 % |
-| `spectrogram.rs`     | 96.08 % | 100.00 % |  97.44 % |
-| `vector.rs`          | 96.35 % |  87.10 % |  92.57 % |
-| **TOTAL**            | **91.78 %** | **90.99 %** | **90.19 %** |
+| `spectrogram.rs`     | 96.15 % | 100.00 % |  94.87 % |
+| `vector.rs`          | 94.32 % |  87.10 % |  92.07 % |
+| **TOTAL**            | **94.19 %** | **93.18 %** | **94.14 %** |
 
 A change is acceptable if **every file stays at or above its baseline** for all
 three metrics (regions, functions, lines).  New public functions added without
