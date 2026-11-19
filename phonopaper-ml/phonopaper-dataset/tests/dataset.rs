@@ -49,7 +49,7 @@ fn labels_and_manifest_are_readable_and_consistent() {
     assert_eq!(labels.len(), usize::try_from(cfg.count).unwrap());
     assert_eq!(read_manifest(dir.path()).unwrap(), manifest);
     assert_eq!(manifest.format_version, FORMAT_VERSION);
-    assert_eq!(FORMAT_VERSION, 2);
+    assert_eq!(FORMAT_VERSION, 3);
     assert_eq!(manifest.curriculum.clean_localization_share, 0.20);
     assert_eq!(manifest.curriculum.frame_filling_share, 0.20);
     assert!((manifest.curriculum.varied_photo_share - 0.60).abs() < f64::EPSILON);

@@ -23,7 +23,7 @@ complete local workflow, use the checked automation rather than transcribing
 individual commands:
 
 ```bash
-# Generates dataset-v2-scale3-50k only when needed, trains, then evaluates
+# Generates dataset-v3-scale3-50k only when needed, trains, then evaluates
 # both validation and training splits. Defaults to the portable CPU backend.
 ./scripts/train-and-eval.sh
 
@@ -33,22 +33,31 @@ BACKEND=wgpu DATASET_COUNT=200000 BATCH_SIZE=16 EPOCHS=50 \
     ARTIFACTS=artifacts-fpn-offset-v1 ./scripts/train-and-eval.sh
 
 # After reviewing metrics, safely stage and test all three embedded artifacts:
-ARTIFACTS=artifacts-v2 ./scripts/embed-model.sh
+ARTIFACTS=artifacts-v3 ./scripts/embed-model.sh
 ```
 
 Every script uses Bash strict mode, resolves repository paths relative to its
 own location, and accepts only non-secret environment configuration. The
 shared dataset check reuses a dataset only when `manifest.json` says format
-version 2 with the requested `SOURCE_SCALE` (default 3) and `labels.csv` is
-present. A missing, malformed, v1, or differently scaled dataset is removed
+version 3 with the requested `SOURCE_SCALE` (default 3) and `labels.csv` is
+present. A missing, malformed, older, or differently scaled dataset is removed
 and deterministically rebuilt instead of being silently reused.
 
-> **Current embedded-model status:** the checked-in application model is
-> **not loadable with the current all-stage FPN/offset architecture** until a
-> new model is trained from scratch and embedded with `scripts/embed-model.sh`.
-> Old checkpoints are also shape-incompatible; use a new artifact directory.
-> Do not ship or run the Android detector from this worktree before completing
-> that step.
+> **Current embedded model:** trained on `dataset-v3-scale3-200k` (A40,
+> batch 32, lr 1e-3, cosine schedule); early stopping kept epoch 12 of 20
+> (mean validation loss 0.520).
+>
+> | Metric (300 v2 validation frames, 128 px) | previous model | current |
+> |---|---|---|
+> | presence accuracy | 98.3 % | 99.0 % |
+> | corners within 3 px / 6 px | 81.5 / 89.8 % | 99.1 / 99.8 % |
+> | corner error p50 / p90 / worst | 0.87 / 6.02 / 188 px | 0.58 / 1.40 / 11.4 px |
+> | quadrilateral IoU mean / p10 / worst | 88.8 / 76.8 / 0 % | 96.6 / 92.9 / 76.1 % |
+> | width / height scale abs error | 8.7 / 3.6 % | 1.4 / 0.8 % |
+>
+> On 300 frames of a fresh v3 dataset (camera stretch, shadows, motion blur):
+> IoU mean / p10 96.4 / 92.5 %, corner p90 1.41 px, worst 29.6 px, presence
+> precision 100 % and recall 97.2 %.
 
 ---
 
@@ -119,8 +128,15 @@ actual marker topology rather than "dark horizontal bars on white".
 
 Every image starts from a random **background** (flat, gradient, blurred
 noise, tiles, stripes) with random rectangles and lines, and ends with
-**camera-like degradations**: contrast/brightness change, vignette, blur,
-Gaussian noise, salt-and-pepper noise.
+**camera-like degradations**: contrast/brightness change, vignette, a linear
+illumination gradient (35 %), a cast shadow (15 %), blur, horizontal or vertical
+motion blur (20 %), Gaussian noise, salt-and-pepper noise.
+
+Since format version 3, 60 % of the non-clean placements are also seen through
+an **anisotropic camera stretch** (one axis expanded by 1/0.5 – 1/0.95 relative
+to the other). Production `prepare_image` stretches a 9:16 or 3:4 camera frame
+to a square without preserving the aspect ratio, so real sheets reach the
+network squashed along one axis; earlier datasets never showed that.
 
 ### `labels.csv`
 
@@ -268,70 +284,68 @@ SafeTensors as described in the [Burn 0.22 migration guide](https://burn.dev/boo
 
 ```text
 input     [1 × 128 × 128] (grayscale, values in [0, 1])
-trunk     5 × (conv 3×3 → BatchNorm → ReLU → maxpool 2)
-          channels 16, 32, 64, 128, 128
-presence  global average pool of final stride-32 stage → Linear(128 → 1 logit)
-corners   all five stages (strides 2, 4, 8, 16 and 32)
+trunk     stage 1: conv 3×3 → BatchNorm → ReLU → maxpool 2             (16 ch, stride 2)
+          stages 2–5: 2 × (conv 3×3 → BatchNorm → ReLU) → maxpool 2   (32, 64, 128, 160 ch)
+presence  global average pool of stage 5 → Linear(160 → 1 logit)
+corners   stages 2–5 (strides 4, 8, 16, 32)
           → separate 1×1 projections to 64 channels
-          → nearest-neighbor upsample to 64 × 64 and sum
+          → nearest-neighbor upsample to 32 × 32 and sum
+          + Linear(global pool of stage 5 → 64) broadcast over the map
           → 2 × (conv 3×3 → BatchNorm → ReLU) → conv 1×1
-          → 4 cell-logit + 4 x-offset + 4 y-offset maps (64 × 64)
+          → 4 cell-logit + 4 x-offset + 4 y-offset maps (32 × 32)
 ```
 
 Corners are localised with **cell classification plus subcell offsets**, not a
 fully connected regressor or global soft-argmax. Each corner independently
 selects its maximum-logit cell, then applies that cell's `tanh`-bounded x/y
-offsets. Diffuse or multimodal probability away from the winning cell therefore
-cannot pull predictions toward the image centre. All five trunk stages provide
-both fine edges and nearly full-frame context through an FPN-style head.
+offsets (up to ±2 input pixels at stride 4). The trunk uses two convolutions
+per stage so the stride-32 features see the whole sheet; the head runs at
+stride 4, which keeps most of the compute in the trunk instead of in 64×64
+head convolutions, and receives a global-context vector so every cell
+"knows" where the sheet is.
 
-The 64×64 maps and five projected feature levels consume substantially more
-training activation memory than the old corner head, so automation deliberately
-defaults to batches of 16 locally, 32 on A40, and 64 on larger cluster GPUs.
-Increase these only after measuring peak memory. The coordinate grid spans
-`[-0.1, 1.1]`, preserving labels for corners just outside the frame.
-
-Output rows are `[presence logit, x0, y0, x1, y1, x2, y2, x3, y3]`; corner
-coordinates are divided by the input side, and may legitimately fall outside
-`[0, 1]`.
+The coordinate grid spans `[-0.1, 1.1]`, preserving labels for corners just
+outside the frame. Output rows are `[presence logit, x0, y0, x1, y1, x2, y2,
+x3, y3]`; corner coordinates are divided by the input side.
 
 The objective is:
 
 ```text
 presence BCE
-+ 1 × nearest-cell cross-entropy
++ 1 × target-cell cross-entropy
 + 2 × target-cell x/y offset Charbonnier loss
 + 5 × decoded-coordinate Charbonnier loss
 + 2 × directed edge-vector Charbonnier loss
 + 1 × relative width/height loss
 ```
 
-One decoded-coordinate comparison chooses the labelled ordering or its
-180°-rotated equivalent per sample; every spatial term then uses that same
-assignment. Cell classification selects the nearest grid cell, offsets retain
-continuous coordinates, edge vectors penalize distorted geometry without
-penalizing translation, and relative size directly opposes systematic box
-contraction or expansion. Spatial terms are averaged over positive samples
-only; an all-negative batch contributes finite zero spatial loss.
-
-The learning rate follows a **cosine decay** from `--learning-rate` to
-`--learning-rate × --min-lr-fraction` (default 0.05) over `--epochs`; the
-plateau of a constant rate showed up as the best epoch sitting in the
-middle of the run with no further progress.
+Spatial terms are averaged over positive samples only; an all-negative batch
+contributes finite zero spatial loss.
 
 #### Orientation ambiguity
 
 A `PhonoPaper` sheet is symmetric under a 180° turn: the bottom marker band
 is the mirror image of the top one and every stripe spans the full width.
-The image therefore cannot tell `TL, TR, BR, BL` from `BR, BL, TL, TR`.  The
-corner loss (and `eval`) take the **minimum over both orderings**, so the
-network is free to commit to either; without this the network hedges towards
-the average of the two — the pattern centre — and corner errors of ~20 px
-result.  At inference, `Detection::canonical()` picks the ordering whose first
-corner is higher in the image.  What the network *does* tell you is which two
-edges carry the marker bands (`c0→c1` and `c2→c3`); which of them is the
-high-frequency end must come from elsewhere (the phone's orientation, or
-decoding both ways and keeping the one that sounds right).
+The image therefore cannot tell `TL, TR, BR, BL` from `BR, BL, TL, TR`.
+
+The trainer resolves this **when loading labels**, with
+`model::canonical_corner_order`: of the two orderings it keeps the one whose
+vector from the first marker-band edge to the second points down-right of the
+anti-diagonal (`dx + dy ≥ 0`). This is a function of the image alone, so each
+of the four corner channels has a single, unambiguous target.
+
+Earlier versions instead took the minimum of the loss over both orderings.
+That let the network commit to either orientation *per sample*, so every
+channel learned a bimodal heat-map ("this corner or the opposite one"). At
+inference each channel takes its own argmax, and the four channels could pick
+different orientations, giving degenerate quadrilaterals with two corners on
+the same physical corner. That was the dominant source of large errors.
+
+At inference, `Detection::canonical()` still picks the "higher corner first"
+ordering for callers. The network tells you which two edges carry the marker
+bands (`c0→c1` and `c2→c3`); which of them is the high-frequency end must come
+from elsewhere (the phone's orientation, or decoding both ways and keeping the
+one that sounds right).
 
 ### Batch jobs on a Slurm cluster
 
@@ -341,7 +355,7 @@ Generate the dataset independently on the CPU partition with:
 cd phonopaper-ml
 sbatch slurm/generate-dataset.sbatch
 # Override the output and size when needed:
-DATASET=dataset-v2-scale3-300k DATASET_COUNT=300000 \
+DATASET=dataset-v3-scale3-300k DATASET_COUNT=300000 \
     sbatch slurm/generate-dataset.sbatch
 ```
 
@@ -365,17 +379,17 @@ sbatch slurm/train-a40.sbatch                 # A40, CUDA:          batch 32, lr
 sbatch slurm/train-h100.sbatch                # H100, CUDA:         batch 64, lr 1e-3, 16 workers
 sbatch slurm/train-rtx6000pro.sbatch          # RTX 6000 Pro, wgpu: batch 64, lr 1e-3, 16 workers
 # tunables are environment variables:
-DATASET=dataset-v2-scale3-200k EPOCHS=60 BATCH_SIZE=48 sbatch slurm/train-a40.sbatch
+DATASET=dataset-v3-scale3-200k EPOCHS=60 BATCH_SIZE=48 sbatch slurm/train-a40.sbatch
 # other partition / GPU with the A40 defaults:
 sbatch --partition=V100-32GB slurm/train-a40.sbatch
 ```
 
-Variables: `REPO`, `DATASET` (default `dataset-v2-scale3-200k`),
+Variables: `REPO`, `DATASET` (default `dataset-v3-scale3-200k`),
 `DATASET_COUNT`, `SOURCE_SCALE`, `IMAGE_SIZE`, `POSITIVE_RATIO`,
 `DATASET_SEED`, `ARTIFACTS` (default `artifacts-<jobid>`), `EPOCHS`,
 `BATCH_SIZE`, `LEARNING_RATE`, `PATIENCE`, `WORKERS`, `SEED`, `BACKEND`
 (`cuda` or `wgpu`), `CUDA_MODULE`, `CARGO_TARGET_DIR`, and `PYTHON`. Before
-reuse, the shared script parses the manifest and requires format v2 plus the
+reuse, the shared script parses the manifest and requires format v3 plus the
 requested source scale; incompatible directories are rebuilt. Output lands in
 `phonopaper-train-<jobid>.out` in the submission directory; the trained model
 is `<ARTIFACTS>/model.bpk`.
@@ -446,9 +460,9 @@ For a repeatable fixture set, the wrapper writes JSON Lines and can compare it
 byte-for-byte with a reviewed baseline:
 
 ```bash
-ARTIFACTS=artifacts-v2 OUTPUT=results.jsonl \
+ARTIFACTS=artifacts-v3 OUTPUT=results.jsonl \
     ./scripts/regression-infer.sh fixtures/positive.png fixtures/negative.png
-ARTIFACTS=artifacts-v2 EXPECTED=baselines/results.jsonl \
+ARTIFACTS=artifacts-v3 EXPECTED=baselines/results.jsonl \
     ./scripts/regression-infer.sh fixtures/positive.png fixtures/negative.png
 ```
 
@@ -481,7 +495,7 @@ it (`phonopaper_android::rectify_pattern`).  The pieces in the library are:
 After reviewing a completed training run, use the safe transfer script:
 
 ```bash
-ARTIFACTS=artifacts-v2 ./scripts/embed-model.sh
+ARTIFACTS=artifacts-v3 ./scripts/embed-model.sh
 ```
 
 It requires non-empty `model.bpk` and `model.json`, stages those files together
@@ -494,9 +508,6 @@ Burn's recorders match weights **by field name**, so `model.rs` must be
 identical in both crates and the weights must come from that exact definition,
 or `load()` fails at start-up. The embedded test compares `model.rs` byte for
 byte and loads `model.bpk` against the parameter shapes in `model.json`.
-
-> The current checked-in weights predate the stride-2 head and are not loadable.
-> A newly trained model must pass this script before the app detector is usable.
 
 Then, from the repository root:
 

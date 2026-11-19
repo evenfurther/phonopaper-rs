@@ -29,7 +29,7 @@ use sample::{CLEAN_LOCALIZATION_SHARE, FRAME_FILLING_SHARE};
 pub use sample::{GeneratorConfig, PositiveKind, Sample, generate_sample};
 
 /// Current `manifest.json` / `labels.csv` format version.
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 /// File name of the `index`-th image.
 #[must_use]

@@ -7,7 +7,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
-DATASET=$(absolute_from_ml "${DATASET:-dataset-v2-scale3-50k}")
+DATASET=$(absolute_from_ml "${DATASET:-dataset-v3-scale3-50k}")
 ARTIFACTS=$(absolute_from_ml "${ARTIFACTS:-artifacts-local}")
 DATASET_COUNT=${DATASET_COUNT:-50000}
 SOURCE_SCALE=${SOURCE_SCALE:-3}

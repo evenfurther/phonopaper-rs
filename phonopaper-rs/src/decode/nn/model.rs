@@ -10,22 +10,27 @@
 //! `input_size` (default 128), with two heads:
 //!
 //! ```text
-//! trunk:    [conv3×3 → BatchNorm → ReLU → maxpool2] × 5   (channels 16, 32, 64, 128, 128)
-//! presence: global average pool of the last stage → Linear(128 → 1)
-//! corners:  all five stages → per-stage 1×1 projection → upsample to stride 2
-//!           → sum → [conv3×3 → BatchNorm → ReLU] × 2 → conv1×1
-//!           → 4 cell-logit + 4 x-offset + 4 y-offset maps (64×64)
+//! trunk:    stage 1: conv3×3(1→16) → BN → ReLU → maxpool2                   (stride 2)
+//!           stages 2–5: [conv3×3 → BN → ReLU] × 2 → maxpool2               (strides 4…32)
+//!           channels 32, 64, 128, 160
+//! presence: global average pool of stage 5 → Linear(160 → 1)
+//! corners:  stages 2–5 → per-stage 1×1 projection → upsample to stride 4 → sum
+//!           + Linear(global pool of stage 5) broadcast over the map
+//!           → [conv3×3 → BN → ReLU] × 2 → conv1×1
+//!           → 4 cell-logit + 4 x-offset + 4 y-offset maps (32×32)
 //! ```
 //!
 //! Corners are **not** regressed by a fully connected layer: that discards
-//! spatial precision and plateaus around 10 % of the frame. Instead, each
-//! corner gets a cell-logit map over a genuine stride-2 grid plus local x/y
-//! offsets. All five trunk stages contribute through equal-width lateral
-//! projections, FPN-style, so fine edges and global context reach the head.
-//! Inference selects the hard maximum-logit cell and applies only that cell's
-//! `tanh`-bounded subcell offsets. Diffuse secondary probability mass therefore
-//! cannot pull corners inward. The grid spans `[-0.1, 1.1]`, so corners slightly
-//! outside the frame stay representable.
+//! spatial precision. Each corner gets a cell-logit map on a stride-4 grid plus
+//! local x/y offsets. Inference selects the hard maximum-logit cell and
+//! applies only that cell's `tanh`-bounded subcell offsets. The grid spans
+//! `[-0.1, 1.1]`, so corners slightly outside the frame stay representable.
+//!
+//! The four corner channels are trained on **canonically ordered** labels
+//! ([`canonical_corner_order`]): a sheet looks the same when turned by 180°,
+//! so without a rule that the image itself determines, every channel learns a
+//! bimodal map ("this corner or the opposite one") and independent per-channel
+//! argmaxes can mix the two orientations into a degenerate quadrilateral.
 //!
 //! # Output
 //!
@@ -36,9 +41,9 @@
 //! | `0`      | presence **logit** (apply a sigmoid to get a probability) |
 //! | `1..=8`  | `x0 y0 x1 y1 x2 y2 x3 y3` — corners **normalised by the input side** (`0.0` = left/top edge, `1.0` = right/bottom edge), clockwise, with `(x0,y0)→(x1,y1)` and `(x2,y2)→(x3,y3)` being the two marker-band edges |
 //!
-//! Because a sheet is symmetric under a 180° turn, the network may return
-//! either `TL, TR, BR, BL` or `BR, BL, TL, TR`; use [`Detection::canonical`]
-//! for a deterministic choice.
+//! Because a sheet is symmetric under a 180° turn, the network returns the
+//! canonical one of `TL, TR, BR, BL` and `BR, BL, TL, TR`; use
+//! [`Detection::canonical`] for the deterministic "higher corner first" choice.
 
 use burn::nn::conv::{Conv2d, Conv2dConfig};
 use burn::nn::pool::{MaxPool2d, MaxPool2dConfig};
@@ -52,23 +57,29 @@ use burn::tensor::ops::{InterpolateMode, InterpolateOptions};
 pub const OUTPUT_SIZE: usize = 9;
 
 /// Channel width of each convolutional stage.
-const STAGE_CHANNELS: [usize; 5] = [16, 32, 64, 128, 128];
+const STAGE_CHANNELS: [usize; 5] = [16, 32, 64, 128, 160];
+
+/// Number of convolutions in each stage.
+const STAGE_DEPTHS: [usize; 5] = [1, 2, 2, 2, 2];
+
+/// Index of the first trunk stage fused into the corner head (stride 4).
+const FIRST_CORNER_STAGE: usize = 1;
 
 /// Number of trunk stages fused into the corner head.
-pub const CORNER_FUSION_STAGES: usize = STAGE_CHANNELS.len();
+pub const CORNER_FUSION_STAGES: usize = STAGE_CHANNELS.len() - FIRST_CORNER_STAGE;
 
 /// Number of raw channels emitted by the corner head.
 pub const CORNER_HEAD_CHANNELS: usize = 12;
 
 /// Stride of the heat-map grid relative to the input.
-const HEATMAP_STRIDE: usize = 2;
+const HEATMAP_STRIDE: usize = 4;
 
-/// Lower extent of the soft-argmax coordinate grid, in normalised units.
+/// Lower extent of the coordinate grid, in normalised units.
 ///
 /// The grid extends beyond the frame so corners up to 10% outside remain
 /// representable.
 pub const HEATMAP_GRID_MIN: f32 = -0.1;
-/// Upper extent of the soft-argmax and heat-map supervision grid.
+/// Upper extent of the coordinate grid and heat-map supervision grid.
 pub const HEATMAP_GRID_MAX: f32 = 1.1;
 
 /// Hyper-parameters of the [`Detector`].
@@ -83,16 +94,14 @@ pub struct DetectorConfig {
     pub hidden: usize,
 }
 
-/// One `conv → BatchNorm → ReLU → maxpool` stage.
+/// One `conv → BatchNorm → ReLU` unit.
 #[derive(Module, Debug)]
-pub struct ConvBlock {
+pub struct ConvUnit {
     conv: Conv2d,
     norm: BatchNorm,
-    activation: Relu,
-    pool: MaxPool2d,
 }
 
-impl ConvBlock {
+impl ConvUnit {
     fn new(in_channels: usize, out_channels: usize, device: &Device) -> Self {
         Self {
             conv: Conv2dConfig::new([in_channels, out_channels], [3, 3])
@@ -100,15 +109,45 @@ impl ConvBlock {
                 .with_bias(false)
                 .init(device),
             norm: BatchNormConfig::new(out_channels).init(device),
+        }
+    }
+
+    fn forward(&self, x: Tensor<4>, activation: &Relu) -> Tensor<4> {
+        activation.forward(self.norm.forward(self.conv.forward(x)))
+    }
+}
+
+/// One trunk stage: `[conv → BatchNorm → ReLU] × depth → maxpool 2`.
+#[derive(Module, Debug)]
+pub struct ConvBlock {
+    units: Vec<ConvUnit>,
+    activation: Relu,
+    pool: MaxPool2d,
+}
+
+impl ConvBlock {
+    fn new(in_channels: usize, out_channels: usize, depth: usize, device: &Device) -> Self {
+        let units = (0..depth)
+            .map(|i| {
+                ConvUnit::new(
+                    if i == 0 { in_channels } else { out_channels },
+                    out_channels,
+                    device,
+                )
+            })
+            .collect();
+        Self {
+            units,
             activation: Relu::new(),
             pool: MaxPool2dConfig::new([2, 2]).with_strides([2, 2]).init(),
         }
     }
 
     fn forward(&self, x: Tensor<4>) -> Tensor<4> {
-        let x = self.conv.forward(x);
-        let x = self.norm.forward(x);
-        let x = self.activation.forward(x);
+        let x = self
+            .units
+            .iter()
+            .fold(x, |x, unit| unit.forward(x, &self.activation));
         self.pool.forward(x)
     }
 }
@@ -119,10 +158,8 @@ pub struct Detector {
     blocks: Vec<ConvBlock>,
     presence: Linear,
     corner_projections: Vec<Conv2d>,
-    corner_conv1: Conv2d,
-    corner_norm1: BatchNorm,
-    corner_conv2: Conv2d,
-    corner_norm2: BatchNorm,
+    corner_context: Linear,
+    corner_head: Vec<ConvUnit>,
     corner_out: Conv2d,
     activation: Relu,
     input_size: usize,
@@ -143,28 +180,23 @@ impl DetectorConfig {
         );
         let mut blocks = Vec::with_capacity(STAGE_CHANNELS.len());
         let mut in_channels = 1;
-        for &out_channels in &STAGE_CHANNELS {
-            blocks.push(ConvBlock::new(in_channels, out_channels, device));
+        for (&out_channels, &depth) in STAGE_CHANNELS.iter().zip(&STAGE_DEPTHS) {
+            blocks.push(ConvBlock::new(in_channels, out_channels, depth, device));
             in_channels = out_channels;
         }
-        let corner_projections = STAGE_CHANNELS
+        let corner_projections = STAGE_CHANNELS[FIRST_CORNER_STAGE..]
             .iter()
             .map(|&channels| Conv2dConfig::new([channels, self.hidden], [1, 1]).init(device))
             .collect();
-        let corner_conv = || {
-            Conv2dConfig::new([self.hidden, self.hidden], [3, 3])
-                .with_padding(PaddingConfig2d::Same)
-                .with_bias(false)
-                .init(device)
-        };
         Detector {
             blocks,
             presence: LinearConfig::new(in_channels, 1).init(device),
             corner_projections,
-            corner_conv1: corner_conv(),
-            corner_norm1: BatchNormConfig::new(self.hidden).init(device),
-            corner_conv2: corner_conv(),
-            corner_norm2: BatchNormConfig::new(self.hidden).init(device),
+            corner_context: LinearConfig::new(in_channels, self.hidden).init(device),
+            corner_head: vec![
+                ConvUnit::new(self.hidden, self.hidden, device),
+                ConvUnit::new(self.hidden, self.hidden, device),
+            ],
             corner_out: Conv2dConfig::new([self.hidden, CORNER_HEAD_CHANNELS], [1, 1]).init(device),
             activation: Relu::new(),
             input_size: self.input_size,
@@ -175,16 +207,16 @@ impl DetectorConfig {
 /// Outputs produced by one detector trunk pass.
 ///
 /// `output` preserves the public `[batch, 9]` inference representation. The
-/// remaining tensors expose the stride-2 head outputs for training and
+/// remaining tensors expose the stride-4 head outputs for training and
 /// diagnostics.
 pub struct DetectorOutput {
     /// Presence logit followed by eight decoded corner coordinates.
     pub output: Tensor<2>,
-    /// Raw stride-2 corner cell logits, channels `0..4` of [`Self::corner_raw`].
+    /// Raw corner cell logits, channels `0..4` of [`Self::corner_raw`].
     pub heatmaps: Tensor<4>,
-    /// Raw stride-2 x-offset maps, channels `4..8` of [`Self::corner_raw`].
+    /// Raw x-offset maps, channels `4..8` of [`Self::corner_raw`].
     pub x_offsets: Tensor<4>,
-    /// Raw stride-2 y-offset maps, channels `8..12` of [`Self::corner_raw`].
+    /// Raw y-offset maps, channels `8..12` of [`Self::corner_raw`].
     pub y_offsets: Tensor<4>,
     /// All 12 raw corner-head channels.
     pub corner_raw: Tensor<4>,
@@ -197,7 +229,7 @@ impl Detector {
         self.input_size
     }
 
-    /// Side of the corner heat-maps (`input_size / 2`).
+    /// Side of the corner heat-maps (`input_size / 4`).
     #[must_use]
     pub fn heatmap_size(&self) -> usize {
         self.input_size / HEATMAP_STRIDE
@@ -220,13 +252,15 @@ impl Detector {
     pub fn forward_with_heatmaps(&self, images: Tensor<4>) -> DetectorOutput {
         let mut x = images;
         let mut features = Vec::with_capacity(CORNER_FUSION_STAGES);
-        for block in &self.blocks {
+        for (index, block) in self.blocks.iter().enumerate() {
             x = block.forward(x);
-            features.push(x.clone());
+            if index >= FIRST_CORNER_STAGE {
+                features.push(x.clone());
+            }
         }
         let pooled = x.mean_dim(3).mean_dim(2).flatten::<2>(1, 3);
-        let logit = self.presence.forward(pooled);
-        let corner_raw = self.corner_head(features);
+        let logit = self.presence.forward(pooled.clone());
+        let corner_raw = self.corner_head(features, pooled);
         let heatmaps = corner_raw.clone().narrow(1, 0, 4);
         let x_offsets = corner_raw.clone().narrow(1, 4, 4);
         let y_offsets = corner_raw.clone().narrow(1, 8, 4);
@@ -240,10 +274,11 @@ impl Detector {
         }
     }
 
-    /// Build the raw stride-2 corner maps from all five trunk stages.
-    fn corner_head(&self, features: Vec<Tensor<4>>) -> Tensor<4> {
+    /// Build the raw stride-4 corner maps from trunk stages 2–5 and the
+    /// globally pooled context.
+    fn corner_head(&self, features: Vec<Tensor<4>>, pooled: Tensor<2>) -> Tensor<4> {
         debug_assert_eq!(features.len(), CORNER_FUSION_STAGES);
-        let [_, _, h, w] = features[0].dims();
+        let [batch, _, h, w] = features[0].dims();
         let mut projected = features
             .into_iter()
             .zip(&self.corner_projections)
@@ -256,12 +291,13 @@ impl Detector {
             );
             fused = fused + upsampled;
         }
-        let x = self.corner_conv1.forward(fused);
-        let x = self.corner_norm1.forward(x);
-        let x = self.activation.forward(x);
-        let x = self.corner_conv2.forward(x);
-        let x = self.corner_norm2.forward(x);
-        let x = self.activation.forward(x);
+        let context = self.corner_context.forward(pooled);
+        let [_, hidden] = context.dims();
+        fused = fused + context.reshape([batch, hidden, 1, 1]);
+        let x = self
+            .corner_head
+            .iter()
+            .fold(fused, |x, unit| unit.forward(x, &self.activation));
         self.corner_out.forward(x)
     }
 
@@ -279,6 +315,26 @@ impl Detector {
         let input = image_tensor(pixels, n, device).unsqueeze::<4>();
         let output = self.forward(input);
         decode_output(&output)[0]
+    }
+}
+
+/// Reorder eight corner coordinates `x0 y0 … x3 y3` into the canonical one of
+/// the two orderings that describe the same sheet.
+///
+/// A sheet is identical when turned by 180°, so `TL, TR, BR, BL` and
+/// `BR, BL, TL, TR` are equally valid labels. The canonical ordering is the
+/// one whose vector from the first marker-band edge (`c0→c1`) to the second
+/// (`c2→c3`) points down-right of the anti-diagonal (`dx + dy ≥ 0`): an
+/// upright or slightly rotated sheet keeps `TL` first, and the ambiguous
+/// boundary lies at a 45° rotation, away from common camera poses.
+#[must_use]
+pub fn canonical_corner_order(c: [f32; 8]) -> [f32; 8] {
+    let dx = (c[4] + c[6]) - (c[0] + c[2]);
+    let dy = (c[5] + c[7]) - (c[1] + c[3]);
+    if dx + dy >= 0.0 {
+        c
+    } else {
+        [c[4], c[5], c[6], c[7], c[0], c[1], c[2], c[3]]
     }
 }
 

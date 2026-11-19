@@ -6,7 +6,7 @@
 #
 # Tunables are environment variables (see slurm/lib/train-and-eval.sh), e.g.:
 #
-#   DATASET=dataset-v2-scale3-200k EPOCHS=60 BATCH_SIZE=64 LEARNING_RATE=1e-3 \
+#   DATASET=dataset-v3-scale3-200k EPOCHS=60 BATCH_SIZE=64 LEARNING_RATE=1e-3 \
 #       sbatch slurm/train-h100.sbatch
 #
 # Logs go to <jobname>-<jobid>.out / .err in the directory you submit from.

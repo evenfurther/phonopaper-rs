@@ -28,7 +28,7 @@ SCRIPTS="$ML/scripts"
 # shellcheck source=../../scripts/lib.sh
 source "$SCRIPTS/lib.sh"
 
-DATASET="$(absolute_from_ml "${DATASET:-dataset-v2-scale3-200k}")"
+DATASET="$(absolute_from_ml "${DATASET:-dataset-v3-scale3-200k}")"
 DATASET_COUNT="${DATASET_COUNT:-200000}"
 SOURCE_SCALE="${SOURCE_SCALE:-3}"
 IMAGE_SIZE="${IMAGE_SIZE:-128}"

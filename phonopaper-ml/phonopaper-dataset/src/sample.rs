@@ -188,6 +188,28 @@ fn random_rotation(rng: &mut Rng) -> (f64, f64) {
     (c, s)
 }
 
+/// Share of non-clean positives (and decoys) seen through a non-square
+/// camera frame that production stretches to the square network input.
+pub const CAMERA_STRETCH_SHARE: f64 = 0.6;
+
+/// Anisotropic scale simulating `resize_exact` of a non-square camera frame
+/// (a 9:16 portrait frame squashes `y` by 0.56 relative to `x`).
+///
+/// Expressed as an expansion of one axis rather than a squash of the other,
+/// so that the placement loop's fit-to-frame shrinking keeps frame-filling
+/// scenes frame-filling; only the ratio matters.
+fn camera_stretch(rng: &mut Rng, kind: PositiveKind) -> (f64, f64) {
+    if kind == PositiveKind::CleanLocalization || !rng.chance(CAMERA_STRETCH_SHARE) {
+        return (1.0, 1.0);
+    }
+    let expand = 1.0 / rng.range_f64(0.5, 0.95);
+    if rng.chance(0.5) {
+        (expand, 1.0)
+    } else {
+        (1.0, expand)
+    }
+}
+
 /// Compute the destination quadrilateral of a sheet's ink box.
 ///
 /// Returns `None` if no placement fitting the tolerance could be found.
@@ -234,19 +256,21 @@ fn random_target_quad(
             )
         }
     };
+    let (stretch_x, stretch_y) = camera_stretch(rng, kind);
     let lo = -OUTSIDE_TOLERANCE * sf;
     let hi = (1.0 + OUTSIDE_TOLERANCE) * sf;
 
     for _attempt in 0..6 {
         let scale = longest / ink_w.max(ink_h);
-        // Affine part: scale, shear, rotate — about the ink-box centre.
+        // Affine part: scale, shear, rotate — about the ink-box centre — then
+        // the camera's anisotropic stretch to the square network input.
         let mapped: Vec<Point> = ink_box
             .iter()
             .map(|p| {
                 let x = (p.x - cx) * scale;
                 let y = (p.y - cy) * scale;
                 let xs = x + shear * y;
-                Point::new(c * xs - s * y, s * xs + c * y)
+                Point::new((c * xs - s * y) * stretch_x, (s * xs + c * y) * stretch_y)
             })
             .collect();
         let min_x = mapped.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
@@ -368,8 +392,28 @@ fn photometric_degradation(rng: &mut Rng, canvas: &mut Canvas) {
         let strength = rng.range_f64(0.1, 0.6) as f32;
         canvas.vignette(rng.range_f64(0.0, sf), rng.range_f64(0.0, sf), strength);
     }
+    if rng.chance(0.35) {
+        #[expect(clippy::cast_possible_truncation, reason = "strength is in [0.2, 0.7]")]
+        let strength = rng.range_f64(0.2, 0.7) as f32;
+        canvas.illumination_gradient(rng.range_f64(-1.0, 1.0), rng.range_f64(-1.0, 1.0), strength);
+    }
+    if rng.chance(0.15) {
+        #[expect(clippy::cast_precision_loss, reason = "image size is a small integer")]
+        let sf = canvas.width() as f64;
+        let a = Point::new(rng.range_f64(0.0, sf), rng.range_f64(0.0, sf));
+        let b = Point::new(rng.range_f64(0.0, sf), rng.range_f64(0.0, sf));
+        #[expect(clippy::cast_possible_truncation, reason = "factor is in [0.45, 0.85]")]
+        let factor = rng.range_f64(0.45, 0.85) as f32;
+        canvas.shadow(a, b, factor);
+    }
     if rng.chance(0.4) {
         canvas.blur(rng.range_usize(1, 2));
+    }
+    if rng.chance(0.2) {
+        // Hand shake: a few source pixels, i.e. about one network pixel.
+        let length = rng.range_usize(3, 10);
+        let horizontal = rng.chance(0.5);
+        canvas.motion_blur(length, horizontal);
     }
     if rng.chance(0.7) {
         #[expect(clippy::cast_possible_truncation, reason = "sigma is bounded")]
