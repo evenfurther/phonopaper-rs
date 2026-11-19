@@ -34,8 +34,8 @@ pub use image::{
     image_to_spectrogram, spectrogram_from_pixels,
 };
 pub use markers::{
-    DataBounds, MarkerColumnGeometry, detect_marker_geometry_at_column, detect_markers,
-    detect_markers_at_column,
+    DataBounds, MarkerColumnGeometry, detect_marker_geometry_at_column,
+    detect_marker_geometry_at_column_in_zones, detect_markers, detect_markers_at_column,
 };
 pub use refine::{CornerRefinement, refine_pattern_corners};
 pub use synth::{

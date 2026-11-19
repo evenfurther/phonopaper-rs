@@ -8,8 +8,8 @@
 
 use image::{DynamicImage, GenericImageView as _, GrayImage, Luma, RgbImage};
 use phonopaper_rs::decode::{
-    DataBounds, detect_marker_geometry_at_column, detect_markers, detect_markers_at_column,
-    refine_pattern_corners,
+    DataBounds, detect_marker_geometry_at_column, detect_marker_geometry_at_column_in_zones,
+    detect_markers, detect_markers_at_column, refine_pattern_corners,
 };
 use phonopaper_rs::render::{RenderOptions, spectrogram_to_image};
 use phonopaper_rs::spectrogram::SpectrogramVec;
@@ -654,4 +654,50 @@ fn marker_not_found_display_includes_reason() {
         msg.contains("marker"),
         "Display should mention markers, got: {msg}"
     );
+}
+
+/// Pad a pattern with `above` white rows on top and `below` on the bottom.
+fn pad_vertically(image: &DynamicImage, above: u32, below: u32) -> DynamicImage {
+    let (w, h) = image.dimensions();
+    let mut out = RgbImage::from_pixel(w, h + above + below, image::Rgb([255u8, 255, 255]));
+    let src = image.to_rgb8();
+    for y in 0..h {
+        for x in 0..w {
+            out.put_pixel(x, y + above, *src.get_pixel(x, y));
+        }
+    }
+    DynamicImage::ImageRgb8(out)
+}
+
+#[test]
+fn zoned_geometry_matches_default_zones_on_a_full_frame_pattern() {
+    let (img, _) = default_phonopaper_image();
+    let h = img.height();
+    let default = detect_marker_geometry_at_column(&img, 1).unwrap();
+    let zoned =
+        detect_marker_geometry_at_column_in_zones(&img, 1, 0..h * 3 / 10, h * 7 / 10..h).unwrap();
+    assert_eq!(default.data.data_top, zoned.data.data_top);
+    assert_eq!(default.data.data_bottom, zoned.data.data_bottom);
+    assert_eq!(default.outer_top, zoned.outer_top);
+    assert_eq!(default.outer_bottom, zoned.outer_bottom);
+}
+
+#[test]
+fn zoned_geometry_finds_bands_outside_the_default_zones() {
+    // A pattern occupying only the middle of a tall frame: its bands fall
+    // outside the default top/bottom 30 % zones but inside the two halves.
+    let (pattern, opts) = default_phonopaper_image();
+    let pad = pattern.height();
+    let img = pad_vertically(&pattern, pad, pad);
+    let h = img.height();
+    assert!(detect_marker_geometry_at_column(&img, 1).is_err());
+    let geometry = detect_marker_geometry_at_column_in_zones(&img, 1, 0..h / 2, h / 2..h).unwrap();
+    assert_eq!(geometry.data.data_top, pad + expected_top(&opts));
+    assert_eq!(geometry.data.data_bottom, pad + expected_bottom(&opts));
+}
+
+#[test]
+fn zoned_geometry_rejects_empty_zones() {
+    let (img, _) = default_phonopaper_image();
+    assert!(detect_marker_geometry_at_column_in_zones(&img, 1, 0..0, 0..0).is_err());
 }

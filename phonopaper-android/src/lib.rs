@@ -33,7 +33,8 @@ use phonopaper_rs::{
     SpectrogramVec,
     decode::{
         AmplitudeMode, DataBounds, SynthesisOptions, column_amplitudes_from_image_into,
-        detect_markers_at_column, nn::PatternDetector, spectrogram_to_audio,
+        detect_marker_geometry_at_column_in_zones, detect_markers_at_column, nn::PatternDetector,
+        spectrogram_to_audio,
     },
     format::TOTAL_BINS,
 };
@@ -63,6 +64,19 @@ const RECTIFY_PAD_X: f64 = 0.03;
 const RECTIFY_MIN_SIDE: f64 = 16.0;
 const RECTIFY_MAX_SIDE: f64 = 4096.0;
 
+/// Vertical margin searched above and below the detected quadrilateral when
+/// checking that its top and bottom edges lie on marker bands, as a fraction
+/// of its height.  Covers the detector's worst observed edge error on photos
+/// of screens, where a button just below the sheet can pull an edge away.
+const BAND_SEARCH_PAD_Y: f64 = 0.4;
+/// Number of columns of the rectified quadrilateral probed for marker bands.
+const BAND_CHECK_COLUMNS: u32 = 64;
+/// Minimum share of probed columns that must agree on each band's position.
+const BAND_MIN_SUPPORT: f64 = 0.3;
+/// Tolerance of the band line fit, as a fraction of the quadrilateral height
+/// (at least 2 rectified pixels).
+const BAND_FIT_TOLERANCE: f64 = 0.02;
+
 /// The embedded detector, deserialised on first use and shared by all calls.
 static DETECTOR: LazyLock<PatternDetector> = LazyLock::new(PatternDetector::new);
 
@@ -80,12 +94,18 @@ static DETECTOR: LazyLock<PatternDetector> = LazyLock::new(PatternDetector::new)
 /// be recovered, or the spectrogram cannot be synthesized.
 pub fn decode_image_to_pcm(image_bytes: &[u8]) -> Result<Vec<i16>, String> {
     let image = image::load_from_memory(image_bytes).map_err(|err| err.to_string())?;
-    let spectrogram = match DETECTOR.find_corners_refined(&image, DETECTION_THRESHOLD) {
-        Some((corners, _)) if !is_axis_aligned(corners, image.width(), image.height()) => {
+    let spectrogram = match locate_pattern(&image) {
+        Some(corners) if !is_axis_aligned(corners, image.width(), image.height()) => {
             let rectified = rectify_pattern(&image, corners);
             decode_spectrogram(&rectified).or_else(|_| decode_spectrogram(&image))?
         }
-        _ => decode_spectrogram(&image)?,
+        // An upright sheet is read directly when possible; the rectified crop
+        // still helps when it is small in a frame full of other content, as
+        // the stripe detector only looks for bands in the frame's top and
+        // bottom 30 %.
+        Some(corners) => decode_spectrogram(&image)
+            .or_else(|_| decode_spectrogram(&rectify_pattern(&image, corners)))?,
+        None => decode_spectrogram(&image)?,
     };
     let options = SynthesisOptions {
         sample_rate: SAMPLE_RATE,
@@ -100,6 +120,160 @@ pub fn decode_image_to_pcm(image_bytes: &[u8]) -> Result<Vec<i16>, String> {
     spectrogram_to_audio::<_, SAMPLES_PER_COLUMN>(&spectrogram, &options, &mut samples);
 
     Ok(samples.into_iter().map(float_to_pcm16).collect())
+}
+
+/// Locate the sheet's ink box with the neural-network detector, then make
+/// sure its top and bottom edges actually lie on the marker bands.
+///
+/// The network's corners are kept when the classical upright refinement
+/// confirmed them.  Otherwise each predicted marker edge is checked against
+/// the image ([`snap_to_marker_bands`]): on photos of screens, a dark button
+/// or icon just outside the sheet can pull a corner well away from the band,
+/// and the stripe detector then fails on the badly rectified crop.
+fn locate_pattern(image: &DynamicImage) -> Option<[[f32; 2]; 4]> {
+    let (corners, refinement) = DETECTOR.find_corners_refined(image, DETECTION_THRESHOLD)?;
+    if refinement.is_some() {
+        return Some(corners);
+    }
+    Some(snap_to_marker_bands(image, corners).unwrap_or(corners))
+}
+
+/// Move the top (`TL→TR`) and bottom (`BL→BR`) edges of `corners` onto the
+/// outer edges of the marker bands actually visible in `image`.
+///
+/// The quadrilateral is rectified with a generous vertical margin
+/// ([`BAND_SEARCH_PAD_Y`]); evenly spaced columns of the rectified crop are
+/// scanned for the full marker topology, the top band in the upper half and
+/// the bottom band in the lower half.  A robust (Theil–Sen) line is fitted to
+/// each band's outer edge, and the fitted edges are mapped back to the image
+/// at the quadrilateral's left and right sides.  The horizontal extent is the
+/// network's.
+///
+/// Returns `None`, keeping the network's corners, when either band is not
+/// found in enough columns or the quadrilateral is degenerate.
+fn snap_to_marker_bands(image: &DynamicImage, corners: [[f32; 2]; 4]) -> Option<[[f32; 2]; 4]> {
+    let crop = rectify_with_padding(image, corners, 0.0, BAND_SEARCH_PAD_Y)?;
+    let rectified = DynamicImage::ImageLuma8(crop.image);
+    let mid = rectified.height() / 2;
+    let full = rectified.height();
+
+    let mut top = Vec::new();
+    let mut bottom = Vec::new();
+    for i in 0..BAND_CHECK_COLUMNS {
+        // Column centres spread over the ink box, avoiding its very ends.
+        let t = (f64::from(i) + 0.5) / f64::from(BAND_CHECK_COLUMNS);
+        let x = crop.pad_x + t * crop.width;
+        let Some(col) = to_pixel(x, rectified.width()) else {
+            continue;
+        };
+        if let Ok(geometry) =
+            detect_marker_geometry_at_column_in_zones(&rectified, col, 0..mid, mid..full)
+        {
+            let xc = f64::from(col) + 0.5;
+            top.push((xc, f64::from(geometry.outer_top)));
+            bottom.push((xc, f64::from(geometry.outer_bottom)));
+        }
+    }
+
+    let tolerance = (crop.height * BAND_FIT_TOLERANCE).max(2.0);
+    let min_support = (f64::from(BAND_CHECK_COLUMNS) * BAND_MIN_SUPPORT).ceil();
+    let top_line = robust_line(&top, tolerance, min_support)?;
+    let bottom_line = robust_line(&bottom, tolerance, min_support)?;
+    if bottom_line.at(crop.pad_x) <= top_line.at(crop.pad_x) {
+        return None;
+    }
+
+    let (left, right) = (crop.pad_x, crop.pad_x + crop.width);
+    let back = |x: f64, y: f64| {
+        let p = crop.to_source.apply(Point::new(x, y));
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "image coordinates are far below f32 precision limits"
+        )]
+        let corner = [p.x as f32, p.y as f32];
+        corner
+    };
+    let snapped = [
+        back(left, top_line.at(left)),
+        back(right, top_line.at(right)),
+        back(right, bottom_line.at(right)),
+        back(left, bottom_line.at(left)),
+    ];
+    snapped
+        .iter()
+        .flatten()
+        .all(|v| v.is_finite())
+        .then_some(snapped)
+}
+
+/// A line `y = intercept + slope · x`.
+#[derive(Debug, Clone, Copy)]
+struct Line {
+    slope: f64,
+    intercept: f64,
+}
+
+impl Line {
+    fn at(self, x: f64) -> f64 {
+        self.intercept + self.slope * x
+    }
+}
+
+/// Theil–Sen line through `points`, accepted only when at least `min_support`
+/// points lie within `tolerance` of it.
+fn robust_line(points: &[(f64, f64)], tolerance: f64, min_support: f64) -> Option<Line> {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "at most BAND_CHECK_COLUMNS points"
+    )]
+    if (points.len() as f64) < min_support || points.len() < 2 {
+        return None;
+    }
+    let mut slopes = Vec::with_capacity(points.len() * (points.len() - 1) / 2);
+    for (i, &(x0, y0)) in points.iter().enumerate() {
+        for &(x1, y1) in &points[i + 1..] {
+            if (x1 - x0).abs() > f64::EPSILON {
+                slopes.push((y1 - y0) / (x1 - x0));
+            }
+        }
+    }
+    let slope = median(&mut slopes)?;
+    let mut intercepts: Vec<f64> = points.iter().map(|&(x, y)| y - slope * x).collect();
+    let intercept = median(&mut intercepts)?;
+    let line = Line { slope, intercept };
+    let support = points
+        .iter()
+        .filter(|&&(x, y)| (y - line.at(x)).abs() <= tolerance)
+        .count();
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "at most BAND_CHECK_COLUMNS points"
+    )]
+    let support = support as f64;
+    (support >= min_support).then_some(line)
+}
+
+fn median(values: &mut [f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(f64::total_cmp);
+    Some(values[values.len() / 2])
+}
+
+/// The column index containing the continuous coordinate `x`, if inside an
+/// image of the given width.
+fn to_pixel(x: f64, width: u32) -> Option<u32> {
+    if !(x.is_finite() && x >= 0.0 && x < f64::from(width)) {
+        return None;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "x is finite, non-negative and below the image width"
+    )]
+    let col = x.floor() as u32;
+    Some(col)
 }
 
 /// Read an upright image with the per-column stripe detector.
@@ -149,7 +323,7 @@ fn is_axis_aligned(corners: [[f32; 2]; 4], width: u32, height: u32) -> bool {
 /// the image is valid but the presence probability is below the threshold.
 pub fn detect_pattern_corners(image_bytes: &[u8]) -> Result<Option<[[f32; 2]; 4]>, String> {
     let image = image::load_from_memory(image_bytes).map_err(|err| err.to_string())?;
-    let Some((corners, _)) = DETECTOR.find_corners_refined(&image, DETECTION_THRESHOLD) else {
+    let Some(corners) = locate_pattern(&image) else {
         return Ok(None);
     };
     #[expect(
@@ -169,26 +343,53 @@ pub fn detect_pattern_corners(image_bytes: &[u8]) -> Result<Option<[[f32; 2]; 4]
 /// grayscale input.
 #[must_use]
 pub fn rectify_pattern(image: &DynamicImage, corners: [[f32; 2]; 4]) -> DynamicImage {
+    rectify_with_padding(image, corners, RECTIFY_PAD_X, RECTIFY_PAD_Y).map_or_else(
+        || DynamicImage::ImageLuma8(image.to_luma8()),
+        |crop| DynamicImage::ImageLuma8(crop.image),
+    )
+}
+
+/// An upright resampling of a quadrilateral, with the mapping back to the
+/// source image.
+struct RectifiedCrop {
+    /// The resampled grayscale crop.
+    image: GrayImage,
+    /// Maps crop coordinates to source-image coordinates.
+    to_source: Homography,
+    /// Left margin of the crop, in pixels.
+    pad_x: f64,
+    /// Width and height of the quadrilateral inside the crop, in pixels.
+    width: f64,
+    height: f64,
+}
+
+/// Resample the quadrilateral `corners` into an upright crop with a white
+/// border of `pad_x` × width and `pad_y` × height on each side.  Returns
+/// `None` for degenerate quadrilaterals.
+fn rectify_with_padding(
+    image: &DynamicImage,
+    corners: [[f32; 2]; 4],
+    pad_x: f64,
+    pad_y: f64,
+) -> Option<RectifiedCrop> {
     let source = image.to_luma8();
     let quad = corners.map(|[x, y]| Point::new(f64::from(x), f64::from(y)));
     let width = quad[0].distance(quad[1]).max(quad[3].distance(quad[2]));
     let height = quad[0].distance(quad[3]).max(quad[1].distance(quad[2]));
     if !(width.is_finite() && height.is_finite()) {
-        return DynamicImage::ImageLuma8(source);
+        return None;
     }
     let width = width.round().clamp(RECTIFY_MIN_SIDE, RECTIFY_MAX_SIDE);
     let height = height.round().clamp(RECTIFY_MIN_SIDE, RECTIFY_MAX_SIDE);
-    let pad_x = (width * RECTIFY_PAD_X).ceil();
-    let pad_y = (height * RECTIFY_PAD_Y).ceil();
+    let pad_x = (width * pad_x).ceil();
+    let pad_y = (height * pad_y).ceil();
     let target = [
         Point::new(pad_x, pad_y),
         Point::new(pad_x + width, pad_y),
         Point::new(pad_x + width, pad_y + height),
         Point::new(pad_x, pad_y + height),
     ];
-    let Some(to_source) = Homography::from_quads(&target, &quad) else {
-        return DynamicImage::ImageLuma8(source);
-    };
+    let to_source = Homography::from_quads(&target, &quad)?;
 
     #[expect(
         clippy::cast_possible_truncation,
@@ -200,7 +401,13 @@ pub fn rectify_pattern(image: &DynamicImage, corners: [[f32; 2]; 4]) -> DynamicI
         let p = to_source.apply(Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5));
         Luma([sample_bilinear(&source, p)])
     });
-    DynamicImage::ImageLuma8(output)
+    Some(RectifiedCrop {
+        image: output,
+        to_source,
+        pad_x,
+        width,
+        height,
+    })
 }
 
 /// Bilinear sample of `image` at continuous coordinates (pixel centres at
