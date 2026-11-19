@@ -5,8 +5,13 @@
 >
 > **This document:** a working specification for this library, assembled by
 > reverse-engineering published sample images, measuring the official Android
-> application's output, and reading a third-party JavaScript reimplementation
-> (<https://github.com/zz85/phonopaper.js>).  **The original author has not
+> application's output, reading a third-party JavaScript reimplementation
+> (<https://github.com/zz85/phonopaper.js>), the official one-page
+> specification image
+> (<https://warmplace.ru/soft/phonopaper/PhonoPaper%20specification%20(en).png>),
+> and the constants of the official desktop builds of PhonoPaper 1.6.2 and
+> Virtual ANS 3.0.4 (Pixilang bytecode `boot.pixicode`, whose variable names
+> are preserved).  **The original author has not
 > published a formal specification or source code.**  Claims in this document
 > are best-effort observations, not authoritative definitions.  See §0 for a
 > per-section confidence assessment.
@@ -49,14 +54,14 @@ confidence we have in it.  Three confidence levels are used throughout:
 | §3 Marker detection — stripe pattern | Directly observed in every reference image | ✅ |
 | §3 Marker detection — data boundary rule | Deduced from pixel measurement; validated against Android output | ✅ |
 | §4 Frequency grid (384 bins, 8 oct, 4 sub) | Consistent across all reference material | ✅ |
-| §5 Frequency formula | Corrected to pivot=252 by measuring Android output (sines.jpg round-trip) | ✅ |
+| §5 Frequency formula | Bottom row = C2 = 65.406 Hz (`PHONOPAPER_LOWEST_FREQ` in the official bytecode; "from 65.4Hz" in the official spec image); pivot A4 = bin 251.  Tonal lines in eight official example images sit within ≈ 2 cents of equal temperament on this grid (≈ 27 cents off with the former pivot 252) | ✅ |
 | §6 Pixel → amplitude: **fractional** `(255−L)/255` | **Our default implementation** — see §6.2 for discussion | ❓ |
 | §6 Pixel → amplitude: **binary threshold** | Empirically fits Android output better than fractional | ⚠️ |
 | §7 `samples_per_column = 353` | Matches Android's confirmed rate of 352.8 (= 44 100 ÷ 125) | ✅ |
-| §7 `gain = 3.0` | This library's chosen default; not observed in reference output | ❓ |
+| §7 `gain = 4.0` + peak normalisation | This library's choice: level-neutral round-trip with its own encoder; never clips | ❓ |
 | §7 Phase-continuous synthesis | Inferred from quality considerations; not confirmed in reference app | ⚠️ |
-| §7 Frequency range synthesised | Android app synthesises **≈ 131–4186 Hz** (bins 96–336, C3–C8) | ⚠️ |
-| §8 STFT parameters (FFT=4096, hop=353) | hop=353 chosen to match Android column rate; FFT size is a reasonable default | ⚠️ |
+| §7 Frequency range synthesised | Android app synthesises **≈ C3–C8** (measured on the former, ¼-semitone-sharp grid) | ⚠️ |
+| §8 Analysis (band energy, multi-resolution FFT 2048–32768, hop=353) | hop=353 matches the Android column rate; the analysis is this library's design, validated by round-trip measurements (§8.3) | ⚠️ |
 | §11 Reading direction left-to-right | Observed in all reference material; no contrary evidence | ✅ |
 
 ---
@@ -243,15 +248,15 @@ bin = clamp(bin, 0, TOTAL_BINS - 1)
 
 ```
          col=0      col=1    …   col=W-1
-        ┌──────┬──────┬──────────────┐   row = 0    (bin 0,   highest freq ≈ 16 744 Hz, above hearing)
+        ┌──────┬──────┬──────────────┐   row = 0    (bin 0,   highest freq ≈ 16 504 Hz)
         │      │      │              │
         │      │      │              │
         │      │      │              │
-        └──────┴──────┴──────────────┘   row = H-1  (bin 383, lowest freq ≈ 66.36 Hz, C2)
+        └──────┴──────┴──────────────┘   row = H-1  (bin 383, lowest freq 65.406 Hz, C2)
 ```
 
-- Row 0 → highest frequency (≈ 16 744 Hz, bin index 0; above the human hearing range)
-- Row `data_height - 1` → lowest frequency (≈ 66.36 Hz, bin index 383; C2)
+- Row 0 → highest frequency (≈ 16 504 Hz, bin index 0)
+- Row `data_height - 1` → lowest frequency (65.406 Hz, bin index 383; C2)
 
 ### 4.3 Octave Separator Lines (optional)
 
@@ -290,43 +295,55 @@ reimplementation.
 
 ### 5.2 Frequency Formula ✅
 
-The centre frequency of bin index `i` (0 = top of image = highest frequency):
+The official application defines the grid from its lowest frequency:
+`PHONOPAPER_LOWEST_FREQ = 65.40635681` (C2, stored as an `f32`) and
+`PHONOPAPER_OCTAVES = 8`, i.e. `freq = LOWEST_FREQ × 2^(rows_from_bottom /
+rows_per_octave)`.  The official specification image says "low freqs from
+65.4Hz".  In terms of the bin index `i` (0 = top of image = highest frequency):
 
 ```
-freq(i) = 2^((63 × MULTITONES − i) / (12 × MULTITONES)) × 440 Hz
-         = 2^((252 − i) / 48) × 440 Hz
+freq(i) = 65.406 Hz × 2^((383 − i) / 48)
+        = 2^((251 − i) / 48) × 440 Hz
 ```
 
 | i | freq (Hz) | Note |
 |---|-----------|------|
-| 0 | 16744.04 | ≈ C10 (top of image; above human hearing) |
-| 96 | 4186.01 | C8 (top of the audible range) |
-| 144 | 2093.00 | C7 |
-| 192 | 1046.50 | C6 |
-| 240 | 523.25 | C5 |
-| 252 | 440.00 | A4 (concert pitch) |
-| 288 | 261.63 | C4 (middle C) |
-| 336 | 130.81 | C3 |
-| 383 | 66.36 | ≈ C2 (bottom of image) |
+| 0 | 16503.98 | top of image (B9 + ¾ semitone) |
+| 47 | 8372.02 | C9 |
+| 95 | 4186.01 | C8 |
+| 143 | 2093.00 | C7 |
+| 191 | 1046.50 | C6 |
+| 239 | 523.25 | C5 |
+| 251 | 440.00 | A4 (concert pitch) |
+| 287 | 261.63 | C4 (middle C) |
+| 335 | 130.81 | C3 |
+| 383 | 65.41 | C2 (bottom of image) |
+
+Every equal-tempered note falls exactly on a bin whose distance from the
+bottom row is a multiple of 4.
+
+> **History.** Earlier versions of this specification used pivot 252
+> (bin 383 = 66.36 Hz), which shifted the whole grid ≈ 25 cents sharp.  Folding
+> the darkness profile of the official example images (`mozart1/2`, `bach -
+> toccata`, `intro2`, `zerozone`, `mayak`, …) modulo one semitone puts their
+> tonal lines 27 cents above equal temperament with pivot 252 and 2 cents
+> above with pivot 251; the official bytecode constant settles the question.
 
 ### 5.3 Inverse Formula
 
 To convert a frequency `f` in Hz to the nearest bin index:
 
 ```
-i = round(252 − log₂(f / 440) × 48)
+i = round(251 − log₂(f / 440) × 48)
 i = clamp(i, 0, 383)
 ```
 
 ### 5.4 Notes on the Frequency Range
 
-- Bin 96 corresponds exactly to C8 ≈ 4186.009 Hz (the top of the audible range).
-  Bins 0–95 represent frequencies above C8 (up to ≈ 16 744 Hz), which are above
-  the range of human hearing; the reference Android application does not synthesise
-  these bins.
-- Bin 383 represents ≈ 66.36 Hz (C2), the bottom of the format's range.
-- The reference Android application synthesises only bins 96–336 (approximately
-  C3–C8, 5 audible octaves).
+- Bin 383 is C2 (65.41 Hz), the bottom of the format's range; bin 95 is C8
+  (4186 Hz); bins 0–47 cover C9–≈16.5 kHz.
+- The reference Android application was measured (on the former grid) to
+  synthesise roughly C3–C8 only; this library synthesises all 384 bins.
 
 ---
 
@@ -513,15 +530,21 @@ for each column c:
 - **`samples_per_column`:** This library defaults to **353** samples/column
   — the closest integer to 352.8 (= 44 100 ÷ 125), the Android app's
   confirmed rate.  The timing error versus Android is < 0.06 %.
-- **`gain`:** This library defaults to **3.0**.  After dB inversion, per-bin
-  amplitudes equal `web_audio_mag = A/4` (for a Hann-windowed sine of
-  amplitude `A`), so `gain = 4.0` would give unity amplitude for a
-  perfectly-aligned bin.  However, the PhonoPaper log-frequency grid has
-  ≈1.5 PP bins per FFT bin, boosting the output by ≈√1.5 ≈ 1.22×; `gain = 3.0`
-  (≈ 4/1.33) compensates and avoids clipping on typical music.
-- **Frequency range:** The Android app synthesises approximately **C3–C8
-  (~131–4186 Hz, bins 96–336)**, not the full 384-bin range.  This library
-  synthesises all 384 bins by default.
+- **`gain`:** This library defaults to **4.0**.  The encoder (§8) stores, for
+  each bin, the peak amplitude `A` of the sinusoids in its band as
+  `A / 4` (the Web Audio `AnalyserNode` scale, where a full-scale sine reads
+  −12 dBFS), so after dB inversion `gain = 4.0` restores the original level.
+  Measured round-trip level error: < 0.5 dB per octave on pink noise,
+  < 0.2 dB for tones from 150 Hz to 6 kHz.
+- **No clipping:** the batch decoder synthesises the whole file and, if the
+  peak exceeds full scale, scales the whole buffer down to a peak of 1.0
+  (§11.4).  The official sample codes were not encoded with this library's
+  dB window; with the former default (gain 3, hard clip) `mozart2.jpg` was
+  clipped on 50 % of its samples, now on none.  The real-time
+  `Synthesizer::synthesize_column` still hard-clips (it cannot look ahead);
+  `synthesize_column_unclipped` returns the raw sum.
+- **Frequency range:** The Android app synthesises approximately **C3–C8**,
+  not the full 384-bin range.  This library synthesises all 384 bins.
 - **Output format:** mono, 16-bit PCM. ✅
 
 #### Step 5 — Write WAV
@@ -594,56 +617,66 @@ Downmix stereo to mono by averaging channels:
 mono[n] = (left[n] + right[n]) / 2
 ```
 
-#### Step 2 — STFT analysis ❓
+#### Step 2 — Multi-resolution analysis ⚠️
 
-This library uses:
+This library's design (the reference encoder's parameters are unknown):
 
-- Window function: **Hann window**
-- FFT size: **4096 samples** (power of two; larger = better frequency resolution)
-- Hop size: **353 samples** (= `round(44100 / 125)`, matching Android's column
-  rate of 352.8; overlap = 1 − 353/4096 ≈ 91.4%)
+- **Column grid:** one image column per `hop = 353` samples
+  (= `round(44100 / 125)`, Android's column rate), `ceil(len / hop)` columns,
+  so the image decodes to the source duration.  Column `c` is centred on
+  sample `c × hop + hop / 2`; samples outside the signal are zero.
+- **Window size per bin:** each PhonoPaper bin covers 1/48 octave, i.e. a
+  bandwidth of ≈ 1.45 % of its centre frequency (≈ 0.95 Hz at C2, ≈ 60 Hz at
+  C8).  Bin `b` is analysed with the smallest power-of-two Hann window
+  `N ∈ [2048, fft_window]` (default `fft_window = 32768`) whose resolution
+  `sample_rate / N` is no coarser than the band.  At 44.1 kHz bins above
+  ≈ 1.5 kHz use 2048 samples and bins below ≈ 90 Hz use 32 768 samples.
+- **Periodic Hann window:** `w[n] = 0.5 − 0.5·cos(2πn/N)`.
+- Long windows cannot change faster than ≈ N/8 samples, so for each window
+  size the analysis is evaluated every `max(1, N / (8 × hop))` columns and
+  the band levels are interpolated linearly in between.
 
-These are reasonable choices but are **not confirmed** as the reference encoder's
-actual values.  Different implementations may use different parameters.
+A single 4096-sample FFT (the former default) is ≈ 10.8 Hz wide: below
+≈ 200 Hz it spreads a tone over several semitones (a 100 Hz tone decoded at
+113 Hz, a 150 Hz tone at 140 Hz).
 
-The Hann window for a frame of length N:
+#### Step 3 — Band energy → stored amplitude ⚠️
+
+Bin `b` with centre `f_b` covers `[f_b·2^(−1/96), f_b·2^(1/96))`; adjacent
+bins tile the axis without gaps or overlap.  FFT bin `k` represents the cell
+`[(k − ½)·Δf, (k + ½)·Δf)`, `Δf = sample_rate / N`; its weight `w_k` is the
+fraction of that cell inside the band.  Then:
 
 ```
-w[n] = 0.5 × (1 − cos(2π × n / (N − 1)))
+E      = Σ_k w_k · |X[k]|²                 # one-sided, k ≤ N/2
+A_peak = sqrt(4 · E / (N · Σ w[n]²))       # peak amplitude of the band's sinusoids
+level  = A_peak / 4                        # Web Audio scale: full-scale sine → 0.25 (−12 dBFS)
+dB     = 20 · log₁₀(max(level, 1e−10))
+A[c][b] = clamp((dB − min_dB) / (max_dB − min_dB), 0, 1)
 ```
 
-For each frame `f`:
-1. Extract samples `[f × hop, f × hop + fft_size)`.
-2. Zero-pad if the frame extends past the end of the signal.
-3. Multiply by the Hann window.
-4. Apply FFT → complex spectrum `X[k]` for k ∈ [0, fft_size).
+with `min_dB = −60`, `max_dB = −10`.
 
-#### Step 3 — Map to PhonoPaper bins ⚠️
+Summing band energy (rather than sampling `|X|` at the bin centre, as the
+former encoder did) keeps the spectrum flat.  Point sampling overweighted low
+frequencies, where several bins read the same wide FFT bin (≈ +8 dB in the
+lowest octave on pink noise), and missed energy between high bins
+(−13 dB at 2.2 kHz, −23 dB at 3.3 kHz for pure tones).
 
-For each PhonoPaper bin `b` ∈ [0, 384):
+#### Step 3b — Measured round-trip behaviour ✅
 
-1. Compute centre frequency: `freq = 2^((252 − b) / 48) × 440`
-2. Find the corresponding FFT bin using linear interpolation between adjacent
-   bins (rather than rounding to the nearest bin):
-   ```
-   k_frac = freq × fft_size / sample_rate
-   k0     = floor(k_frac)
-   t      = k_frac − k0
-   mag    = |X[k0]| × (1 − t) + |X[k0 + 1]| × t
-   ```
-3. Normalise to dB scale (matching the Web Audio API `AnalyserNode`):
-   ```
-   web_audio_mag = mag / fft_size
-   dB = 20 × log₁₀(max(web_audio_mag, 1×10⁻¹⁰))
-   A[f][b] = clamp((dB − min_dB) / (max_dB − min_dB), 0.0, 1.0)
-   ```
-   where `min_dB = −60.0` and `max_dB = −10.0`.
+Encode → decode with all defaults (measured, see `tests/roundtrip.rs`):
 
-   The window `[−60, −10]` covers the practical dynamic range of Hann-windowed
-   audio: bins quieter than −60 dBFS are treated as silence and produce a white
-   pixel.  A full-scale sine (amplitude 1.0) produces
-   `web_audio_mag ≈ 0.25` (= −12 dBFS), which maps to amplitude ≈ 0.98
-   (nearly black) without clamping.
+| Input tone | Decoded peak | Energy within ±50 cents | Level change |
+|---|---|---|---|
+| 70 Hz | −30 cents | 65 % | −18 dB |
+| 100 Hz | −25 cents | 88 % | −4 dB |
+| 150 Hz | −21 cents | 99 % | +0.2 dB |
+| 220 Hz – 6 kHz | within ±12 cents | ≥ 98.6 % | within ±1.1 dB |
+
+Pink noise: every octave from 65 Hz to 16 kHz within 0.5 dB of the input.
+The residual loss at 70 Hz is the time/frequency trade-off of a 0.74 s
+window; it can be reduced further with `fft_window = 65536`.
 
 #### Step 4 — Render data area ✅
 
@@ -695,8 +728,9 @@ OCTAVES              = 8
 TOTAL_BINS           = 384        # = 8 × 12 × 4
 BINS_PER_OCTAVE      = 96         # = 12 × 4
 
-HIGH_FREQ            = 16744.036 Hz  # bin 0   (≈ C10, above hearing)  ✅
-LOW_FREQ             =    66.358 Hz  # bin 383 (≈ C2)                  ✅
+HIGH_FREQ            = 16503.980 Hz  # bin 0                               ✅
+LOW_FREQ             =    65.406 Hz  # bin 383 (C2, official constant)     ✅
+A4 bin               = 251
 
 SAMPLE_RATE          = 44 100 Hz  # ✅ confirmed in Android output
 
@@ -710,16 +744,16 @@ DATA_HEIGHT          = 720        # = 8 × 90
 
 # Synthesis — this library's defaults
 SAMPLES_PER_COLUMN   = 353        # = round(44100 / 125); matches Android's 352.8
-GAIN                 = 3.0        # 4/1.33; compensates for ~1.5 PP bins sharing each FFT bin
+GAIN                 = 4.0        # inverts the encoder's ×0.25 (Web Audio) scale
+                                  # batch output is peak-normalised, never clipped
 
 # Analysis — this library's defaults ❓
-FFT_WINDOW           = 4096
+FFT_WINDOW           = 32768      # largest window; per-bin size chosen in [2048, 32768]
 HOP_SIZE             = 353
 MIN_DB               = -60.0     # maps to amplitude 0.0 (silence / white pixel)
 MAX_DB               = -10.0     # maps to amplitude 1.0 (maximum / black pixel)
-                                  # Chosen to avoid saturating full-scale audio bins:
-                                  # a Hann-windowed full-scale sine gives web_audio_mag=0.25
-                                  # (= -12 dBFS), safely below this ceiling.
+                                  # A full-scale sine measures 0.25 (= -12 dBFS),
+                                  # safely below this ceiling.
 ```
 
 ---
@@ -731,28 +765,28 @@ MAX_DB               = -10.0     # maps to amplitude 1.0 (maximum / black pixel)
 > What frequency corresponds to bin 200?
 
 ```
-freq(200) = 2^((252 − 200) / 48) × 440
-          = 2^(52 / 48) × 440
-          = 2^(1.0833) × 440
-          ≈ 2.117 × 440
-          ≈ 931.5 Hz
+freq(200) = 2^((251 − 200) / 48) × 440
+          = 2^(51 / 48) × 440
+          = 2^(1.0625) × 440
+          ≈ 2.0885 × 440
+          ≈ 918.9 Hz
 ```
 
-That is approximately A5 / B♭5.
+That is A♯5 minus a quarter of a semitone.
 
 ### 10.2 Bin for a given frequency
 
 > Which bin is closest to 261.63 Hz (middle C, C4)?
 
 ```
-i = round(252 − log₂(261.63 / 440) × 48)
-  = round(252 − log₂(0.5946) × 48)
-  = round(252 − (−0.7500) × 48)
-  = round(252 + 36)
-  = 288
+i = round(251 − log₂(261.63 / 440) × 48)
+  = round(251 − log₂(0.5946) × 48)
+  = round(251 − (−0.7500) × 48)
+  = round(251 + 36)
+  = 287
 ```
 
-Bin 288 corresponds to C4 (middle C).
+Bin 287 corresponds to C4 (middle C).
 
 ### 10.3 Duration of a 1400-column image
 
@@ -792,16 +826,16 @@ additional faint lines at the corresponding bins:
 
 ```
 # Example: approximate a flute playing A4 (440 Hz)
-fundamental   : bin 252   (440 Hz),  amplitude 1.0
-2nd harmonic  : bin 204   (880 Hz),  amplitude 0.5
-3rd harmonic  : bin 176   (1320 Hz), amplitude 0.25
-4th harmonic  : bin 156   (1760 Hz), amplitude 0.12
+fundamental   : bin 251   (440 Hz),  amplitude 1.0
+2nd harmonic  : bin 203   (880 Hz),  amplitude 0.5
+3rd harmonic  : bin 175   (1320 Hz), amplitude 0.25
+4th harmonic  : bin 155   (1760 Hz), amplitude 0.12
 ```
 
 The bin for harmonic `n` of fundamental frequency `f` is:
 
 ```
-bin(n·f) = round(252 − log₂(n·f / 440) × 48)
+bin(n·f) = round(251 − log₂(n·f / 440) × 48)
 ```
 
 Amplitude of each harmonic is left to the encoder; a `1/n` roll-off mimics a
@@ -860,21 +894,22 @@ same is unconfirmed.
 
 ### 11.4 Gain and clipping ❓
 
-With 384 simultaneous oscillators at full amplitude the raw sum would reach 384.
-This library's default gain of `3.0` still allows clipping (`384 × 3.0 = 1152`
-maximum, which is well above 1.0).  In practice, with dB-mode decoding and
-typical music content, the per-bin amplitudes are much smaller and clipping is
-uncommon; however, automatic peak normalisation (see below) is safer.
+With 384 simultaneous oscillators at full amplitude the raw sum can reach 384,
+and images not produced by this library's encoder (e.g. the official sample
+codes, drawn with a different level mapping) are typically much denser than
+the default dB window assumes.  Hard-clipping such output is the most audible
+defect a decoder can have.
 
-The reference application's output clips on loud content, consistent with either
-a fixed gain or binary thresholding (§6.2) — binary thresholding means that a
-column with 384 simultaneously active bins can sum to 384 without any gain
-reduction.
+This library therefore **peak-normalises** in batch decoding
+(`spectrogram_to_audio`, `decode_image_to_wav*`, the CLI): it synthesises the
+whole output at `gain`, and if the peak exceeds 1.0 divides the whole buffer
+by that peak (`decode::normalize_peak`).  Material that already fits is left
+at its original level, so encode → decode round-trips stay level-accurate.
 
-For highest fidelity in offline decoding, **automatic peak normalisation** is
-preferable: synthesise the full output, measure the peak absolute value, then
-divide the entire buffer by that peak.  A fixed gain is simpler for real-time
-streaming.
+The real-time `Synthesizer::synthesize_column` cannot look ahead and still
+hard-clips to ±1.0; real-time callers should use
+`synthesize_column_unclipped` with their own limiter, as the official
+application does (it has had a compressor since v1.5).
 
 ### 11.5 JPEG vs PNG
 
@@ -891,9 +926,8 @@ regardless of the audio sample rate.  However:
 - **Decoding:** the number of audio samples per image column
   (`samples_per_column`) scales the playback speed but not the pitch.  See §7.3
   for measured values from the Android app.
-- **Encoding:** the STFT bin-to-PhonoPaper-bin mapping depends on both the FFT
-  size and the input sample rate. The mapping must be recomputed for each source
-  file if the sample rate differs from 44 100 Hz.
+- **Encoding:** the per-bin window sizes and band weights depend on the
+  input sample rate and are recomputed for each source file.
 
 ### 11.7 Stereo ✅
 
@@ -916,8 +950,8 @@ from the official Android application:
 |-----------|-------------|-------------|
 | `samples_per_column` | 353 (default, matches Android) | 352.8 (= 44 100 ÷ 125) |
 | Amplitude model | Fractional (default) | Likely binary ~0.85 threshold |
-| Frequency range synthesised | All 384 bins (≈ C2–inaudible) | Approximately bins 96–336 (C3–C8) |
-| Output clipping | Clamped to ±1.0 | Clips at ±1.0 |
+| Frequency range synthesised | All 384 bins (C2 – ≈ 16.5 kHz) | Approximately C3–C8 |
+| Loud output | Peak-normalised (batch); hard-clipped in `synthesize_column` | Compressor/limiter (since v1.5) |
 | Leading silence | None | ≈ 1152 samples (~26 ms) |
 
 To approximate Android playback with this library:

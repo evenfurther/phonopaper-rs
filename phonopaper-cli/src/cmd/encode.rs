@@ -26,11 +26,13 @@ pub struct EncodeArgs {
     /// Defaults to the input filename with its extension replaced by `.png`.
     pub output: Option<String>,
 
-    /// FFT window size in samples (must be a power of two).
+    /// Largest FFT window in samples (must be a power of two).
     ///
-    /// Larger windows give better frequency resolution but coarser time
-    /// resolution. 4096 is a good default.
-    #[arg(long, default_value_t = 4096, value_name = "N")]
+    /// The encoder analyses each frequency bin with the smallest window
+    /// (2048 samples or more) that resolves the bin's 1/48-octave band, up to
+    /// this size.  The default 32768 keeps low notes on pitch down to C2;
+    /// smaller values trade low-frequency accuracy for time resolution.
+    #[arg(long, default_value_t = 32_768, value_name = "N")]
     pub fft_window: usize,
 
     /// Hop size in samples between successive FFT frames.

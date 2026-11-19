@@ -41,12 +41,10 @@ pub struct DecodeArgs {
     /// Master output gain (linear).
     ///
     /// Scales the synthesized waveform before writing to WAV.  With dB
-    /// inversion active (the default), `gain = 4.0` would give unity amplitude
-    /// for a perfectly-aligned single FFT bin, but in practice `PhonoPaper` bins
-    /// overlap (≈1.5 PP bins share each FFT bin), boosting output by ≈1.22×.
-    /// The default `3.0` compensates to give approximately unity round-trip
-    /// amplitude on typical music content.  Lower this if you hear distortion.
-    #[arg(long, default_value_t = 3.0, value_name = "GAIN")]
+    /// inversion active (the default), `4.0` reproduces the level of audio
+    /// encoded by `phonopaper encode`.  The output is never clipped: if it
+    /// would exceed full scale, the whole file is scaled down to fit.
+    #[arg(long, default_value_t = 4.0, value_name = "GAIN")]
     pub gain: f32,
 
     /// Binary amplitude threshold (e.g. 0.85 for Android-like decoding).

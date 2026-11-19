@@ -98,15 +98,19 @@ pub struct SynthesisOptions {
     pub sample_rate: u32,
     /// Master gain applied to the output before clipping.
     ///
-    /// Scales the synthesized waveform before writing to WAV.  After dB
-    /// inversion, per-bin amplitudes equal `web_audio_mag = |X[k]| / fft_size`.
-    /// For a Hann-windowed FFT, a sine of amplitude `A` produces
-    /// `web_audio_mag = A / 4`, so `gain = 4.0` would give unity amplitude
-    /// for a perfectly-aligned single FFT bin.  However, the `PhonoPaper`
-    /// log-frequency grid has ≈1.5 PP bins per FFT bin (multiple PP bins read
-    /// the same FFT magnitude), boosting the output by ≈√1.5 ≈ 1.22×.
-    /// The default `3.0` (= 4 / 1.33) compensates and avoids clipping on
-    /// typical music content.  Lower this if you still hear distortion.
+    /// Scales the synthesized waveform before writing to WAV.  The encoder
+    /// ([`crate::encode::audio_to_spectrogram`]) stores the peak amplitude of
+    /// the sinusoids in each bin's band scaled by
+    /// [`crate::encode::FULL_SCALE_SINE_LEVEL`] (`0.25`), so after dB inversion
+    /// the default `gain = 4.0` reproduces the original level: an
+    /// encode → decode round-trip is level-neutral within ≈ 0.5 dB across the
+    /// whole spectrum.
+    ///
+    /// [`Synthesizer::synthesize_column`] hard-clips its output to `[-1, 1]`.
+    /// The batch entry points ([`spectrogram_to_audio`] and the WAV decoders)
+    /// instead scale the whole output down when it would clip, so loud images
+    /// (such as the official sample codes, which were not encoded with this
+    /// library's dB window) are never distorted.
     ///
     /// Use `AmplitudeMode::Linear` with `gain ≈ 0.15` for images encoded
     /// without a dB window.
@@ -163,7 +167,7 @@ impl Default for SynthesisOptions {
     fn default() -> Self {
         Self {
             sample_rate: SAMPLE_RATE,
-            gain: 3.0,
+            gain: 4.0,
             decode_gamma: 1.0,
             mode: AmplitudeMode::default(),
         }
@@ -307,7 +311,8 @@ impl<const SPS: usize> Synthesizer<SPS> {
     /// bin; in [`AmplitudeMode::Db`] mode the stored amplitude is inverted
     /// through the dB window to recover the true linear magnitude.
     ///
-    /// The `SPS` mono PCM samples in `[-1.0, 1.0]` are written into `output`.
+    /// The `SPS` mono PCM samples, hard-clipped to `[-1.0, 1.0]`, are written
+    /// into `output`.
     /// The internal phasor state is updated so that the next call continues
     /// without a phase discontinuity.
     ///
@@ -315,6 +320,23 @@ impl<const SPS: usize> Synthesizer<SPS> {
     ///
     /// Panics if `amplitudes.len() != TOTAL_BINS`.
     pub fn synthesize_column(&mut self, amplitudes: &[f32], output: &mut [f32; SPS]) {
+        self.synthesize_column_unclipped(amplitudes, output);
+        for o in output.iter_mut() {
+            *o = o.clamp(-1.0, 1.0);
+        }
+    }
+
+    /// Like [`synthesize_column`](Self::synthesize_column), but without the
+    /// final clamp to `[-1.0, 1.0]`: the samples are the raw additive sum
+    /// times [`SynthesisOptions::gain`].
+    ///
+    /// Use this when the caller applies its own limiting or normalisation
+    /// (as [`spectrogram_to_audio`] does).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `amplitudes.len() != TOTAL_BINS`.
+    pub fn synthesize_column_unclipped(&mut self, amplitudes: &[f32], output: &mut [f32; SPS]) {
         assert_eq!(
             amplitudes.len(),
             TOTAL_BINS,
@@ -395,7 +417,7 @@ impl<const SPS: usize> Synthesizer<SPS> {
         }
 
         for (o, &b) in output.iter_mut().zip(self.buf.iter()) {
-            *o = (b * gain).clamp(-1.0, 1.0);
+            *o = b * gain;
         }
     }
 
@@ -535,6 +557,10 @@ const RENORM_INTERVAL: usize = 128;
 /// The phases of all oscillators are maintained continuously across columns to
 /// avoid clicks at column boundaries.
 ///
+/// The output is **never clipped**: if the synthesised signal (after
+/// [`SynthesisOptions::gain`]) exceeds `[-1.0, 1.0]`, the whole buffer is
+/// scaled down so that its peak is exactly `1.0` (see [`normalize_peak`]).
+///
 /// ## Implementation — three-table phasor synthesis with 4-lane polyphase
 ///
 /// This function is a thin wrapper over [`Synthesizer`]: it constructs one
@@ -625,6 +651,25 @@ pub fn spectrogram_to_audio<S: AsRef<[f32]>, const SPS: usize>(
             .try_into()
             .expect("slice length is SPS by construction");
         // SAFETY: col is in 0..num_columns by the loop bounds above.
-        synth.synthesize_column(spec.column_or_panic(col), chunk_arr);
+        synth.synthesize_column_unclipped(spec.column_or_panic(col), chunk_arr);
     }
+
+    normalize_peak(output);
+}
+
+/// Scale `samples` down uniformly so that its peak absolute value is at most
+/// `1.0`.  Buffers that already fit in `[-1.0, 1.0]` are left untouched, so
+/// quiet material keeps its level while loud material is never clipped.
+///
+/// Returns the scale factor that was applied (`1.0` if none).
+pub fn normalize_peak(samples: &mut [f32]) -> f32 {
+    let peak = samples.iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
+    if peak <= 1.0 {
+        return 1.0;
+    }
+    let scale = 1.0 / peak;
+    for s in samples.iter_mut() {
+        *s = (*s * scale).clamp(-1.0, 1.0);
+    }
+    scale
 }

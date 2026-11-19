@@ -41,7 +41,7 @@ This repository contains a Cargo workspace plus an Android app:
 | Y axis | Frequency, logarithmic musical scale (top = high, bottom = low) |
 | Pixel brightness | White = silence, black = maximum amplitude |
 | Frequency bins | 384 (8 octaves × 12 semitones × 4 subdivisions) |
-| Frequency range | ≈ 66 Hz (C2) … ≈ 4186 Hz (C8); bins 0–95 above C8 are above human hearing |
+| Frequency range | 65.41 Hz (C2, bottom row) … ≈ 16.5 kHz (top row), 8 octaves; A4 = 440 Hz is bin 251 |
 | Marker bands | Alternating black/white stripes at top and bottom for auto-calibration |
 
 For a detailed technical description see [`PHONOPAPER_SPEC.md`](PHONOPAPER_SPEC.md).
@@ -85,7 +85,7 @@ Default output: `<input-stem>.wav` (mono, 16-bit PCM).
 |---|---|---|
 | `--samples-per-column <N>` | `353` | PCM samples synthesised per image column (353 ≈ Android's 44 100 ÷ 125) |
 | `--sample-rate <HZ>` | `44100` | Output sample rate |
-| `--gain <GAIN>` | `3.0` | Master output gain (linear) |
+| `--gain <GAIN>` | `4.0` | Master output gain (linear); `4.0` restores the level of audio encoded by `phonopaper encode`. Output that would exceed full scale is scaled down, never clipped |
 | `--gamma <G>` | `1.0` | Inverse gamma for pixel → amplitude; must match the `--gamma` used when encoding |
 | `--min-db <DB>` | `-60.0` | Lower bound of the dB window used when the image was encoded |
 | `--max-db <DB>` | `-10.0` | Upper bound of the dB window used when the image was encoded |
@@ -115,8 +115,8 @@ Default output: `<input-stem>.png`.
 
 | Option | Default | Description |
 |---|---|---|
-| `--fft-window <N>` | `4096` | FFT window size in samples (power of two) |
-| `--hop-size <N>` | `353` | Hop size between FFT frames; controls columns/second |
+| `--fft-window <N>` | `32768` | Largest FFT window (power of two); each bin is analysed with the smallest window (≥ 2048) that resolves its 1/48-octave band |
+| `--hop-size <N>` | `353` | Samples per image column; controls columns/second |
 | `--px-per-octave <PX>` | `90` | Pixels per octave (total data height = value × 8) |
 | `--gamma <G>` | `1.0` | Gamma correction applied to amplitudes before writing pixels |
 | `--min-db <DB>` | `-60.0` | Bins quieter than this map to white (silence) |
@@ -155,7 +155,7 @@ phonopaper robust-decode --input <FILE> --output <FILE> [OPTIONS]
 | `-i, --input <FILE>` | required | Input image (PNG or JPEG) |
 | `-o, --output <FILE>` | required | Output WAV file (mono, 16-bit PCM) |
 | `--sample-columns <N>` | `50` | Number of evenly-spaced columns to sample for marker detection |
-| `--gain <GAIN>` | `3.0` | Master output gain (linear) |
+| `--gain <GAIN>` | `4.0` | Master output gain (linear); output is scaled down instead of clipped |
 | `--sample-rate <HZ>` | `44100` | Output sample rate |
 | `--samples-per-column <N>` | `353` | PCM samples synthesised per image column |
 | `--min-db <DB>` | `-60.0` | Lower bound of the dB window |
