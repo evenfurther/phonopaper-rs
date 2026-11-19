@@ -233,13 +233,14 @@ fn generate_blank_pdf(args: &BlankArgs) -> Vec<u8> {
         c.end_text();
     }
 
-    // "Inaudible" annotation for the top zone (above C8, > 4186 Hz).
+    // Annotation for the top zone (C9–C10, ≈ 8.4–16.5 kHz).  With the grid
+    // starting at C2 = 65.41 Hz, the two top zones lie above C8.
     let top_zone_center_y = data_y_bottom + 7.5 * zone_h;
     c.begin_text();
     c.set_font(font_name, 5.0);
     c.set_fill_gray(0.55);
     c.next_line(data_x_start + mm_to_pt(1.0), top_zone_center_y);
-    c.show(Str(b"(inaudible > 4186 Hz)"));
+    c.show(Str(b"(> 8.4 kHz, barely audible)"));
     c.end_text();
 
     // Footer note.

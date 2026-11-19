@@ -15,7 +15,7 @@
 //! | X axis   | Time (left → right) |
 //! | Y axis   | Frequency, logarithmic (top = high, bottom = low) |
 //! | Brightness | White = silence, black = maximum amplitude |
-//! | Frequency range | ~16.35 Hz (C0) – ~4186 Hz (C8), 8 octaves |
+//! | Frequency range | 65.41 Hz (C2, bottom row) – ≈ 16.5 kHz (top row), 8 octaves |
 //! | Frequency bins | 384 (12 semitones × 4 subdivisions × 8 octaves) |
 //! | Markers | Alternating black/white stripes with one thick stripe at top and bottom |
 //!

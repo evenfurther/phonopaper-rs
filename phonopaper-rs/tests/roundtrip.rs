@@ -65,19 +65,24 @@ fn analysis_opts() -> AnalysisOptions {
 
 /// Analysis + synthesis options using the **dB encode/decode path** with
 /// matched min/max dB.  Use these for tests that exercise the full pipeline.
+///
+/// The analysis uses the default (multi-resolution, up to 32 768 samples)
+/// window: with a single 4096-sample window the FFT is coarser than the
+/// 1/48-octave bands below ≈ 750 Hz, so a pure tone is spread over several
+/// bins and the per-frequency power measured by these tests is diluted.
 fn db_analysis_opts() -> AnalysisOptions {
     AnalysisOptions {
-        fft_window: 4096,
         hop_size: 512,
         min_db: -60.0,
         max_db: -10.0,
+        ..AnalysisOptions::default()
     }
 }
 
 fn db_synth_opts() -> SynthesisOptions {
     SynthesisOptions {
         sample_rate: SAMPLE_RATE,
-        gain: 3.0,
+        gain: 4.0,
         decode_gamma: 1.0,
         mode: AmplitudeMode::Db {
             min_db: -60.0,
@@ -453,5 +458,100 @@ fn darker_pixel_produces_louder_output() {
         "loud source (10× amplitude) should decode to at least 5× RMS of quiet source; \
          got loud={rms_loud:.4} quiet={rms_quiet:.4} ratio={:.2}×",
         rms_loud / rms_quiet
+    );
+}
+
+// ─── regression tests for the low-frequency / spectral-balance fixes ─────────
+
+/// Encode `input` with the default analysis options and decode it with the
+/// default synthesis options (gain 4, dB window −60…−10) at 353 samples per
+/// column, so that the output is time-aligned with the input.
+fn default_round_trip(input: &[f32]) -> Vec<f32> {
+    const SPS: usize = 353;
+    let spec = audio_to_spectrogram(input, SAMPLE_RATE, &AnalysisOptions::default()).unwrap();
+    let mut output = vec![0.0_f32; spec.num_columns() * SPS];
+    spectrogram_to_audio::<_, SPS>(&spec, &SynthesisOptions::default(), &mut output);
+    output
+}
+
+/// RMS of `samples[from..to]`.
+fn rms(samples: &[f32], from: usize, to: usize) -> f64 {
+    let s = &samples[from..to];
+    let sum: f64 = s.iter().map(|&x| f64::from(x) * f64::from(x)).sum();
+    #[expect(clippy::cast_precision_loss, reason = "short test buffers")]
+    let n = s.len() as f64;
+    (sum / n).sqrt()
+}
+
+/// Regression: low notes must come back at the right pitch.
+///
+/// With the previous single 4096-sample FFT (10.8 Hz resolution) a 100 Hz
+/// tone decoded with its peak at ≈ 113 Hz (+2 semitones) and a 150 Hz tone at
+/// ≈ 140 Hz.  The multi-resolution analysis keeps the decoded peak within a
+/// quarter-tone of the input down to 100 Hz.
+#[test]
+fn low_tones_keep_their_pitch() {
+    let n = SAMPLE_RATE as usize; // 1 s
+    let mid = (n / 4, 3 * n / 4);
+    for f in [100.0_f32, 150.0, 220.0] {
+        let input = sine_wave(f, 0.3, n);
+        let output = default_round_trip(&input);
+        let seg = &output[mid.0..mid.1];
+        // Scan ±3 semitones in 5-cent steps for the strongest component.
+        let (best_cents, _) = (-60..=60)
+            .map(|step| {
+                let cents = f64::from(step) * 5.0;
+                let probe = f64::from(f) * 2f64.powf(cents / 1200.0);
+                (cents, dft_power_at(seg, probe, SAMPLE_RATE))
+            })
+            .fold((0.0, 0.0), |a, b| if b.1 > a.1 { b } else { a });
+        assert!(
+            best_cents.abs() <= 50.0,
+            "{f} Hz decoded with its peak {best_cents:+.0} cents away"
+        );
+    }
+}
+
+/// Regression: the encode → decode chain must not tilt the spectrum.
+///
+/// The previous encoder sampled the FFT at each bin centre: low bins all
+/// read the same wide FFT bin (≈ +8 dB in the lowest octave) and high bins
+/// missed the energy between them (−13 dB at 2.2 kHz, −23 dB at 3.3 kHz).
+/// Band-energy analysis keeps every tone within 1.5 dB of its input level.
+#[test]
+fn round_trip_level_is_flat_across_the_spectrum() {
+    let n = SAMPLE_RATE as usize;
+    for f in [220.0_f32, 440.0, 1000.0, 2200.0, 3300.0, 6000.0] {
+        let input = sine_wave(f, 0.3, n);
+        let output = default_round_trip(&input);
+        let db = 20.0 * (rms(&output, n / 4, 3 * n / 4) / rms(&input, n / 4, 3 * n / 4)).log10();
+        assert!(
+            db.abs() < 1.5,
+            "{f} Hz: round-trip level change {db:+.1} dB"
+        );
+    }
+}
+
+/// Regression: the default round-trip must not clip.
+///
+/// A dense chord at high level used to exceed full scale with the previous
+/// default gain and be hard-clipped.  The batch synthesiser now scales the
+/// output down instead, so it stays within `[-1, 1]` and keeps every partial.
+#[test]
+fn loud_round_trip_is_not_clipped() {
+    let n = SAMPLE_RATE as usize;
+    let mut input = vec![0.0_f32; n];
+    for f in [110.0_f32, 220.0, 330.0, 440.0, 550.0, 660.0] {
+        for (s, x) in input.iter_mut().zip(sine_wave(f, 0.3, n)) {
+            *s += x;
+        }
+    }
+    let output = default_round_trip(&input);
+    let peak = output.iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
+    assert!(peak <= 1.0, "peak {peak} exceeds full scale");
+    let clipped = output.iter().filter(|s| s.abs() >= 0.9999).count();
+    assert!(
+        clipped < 4,
+        "{clipped} samples sit at full scale; output looks clipped"
     );
 }

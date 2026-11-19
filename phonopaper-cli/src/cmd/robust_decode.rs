@@ -27,8 +27,9 @@ pub struct RobustDecodeArgs {
     #[arg(long, default_value_t = 50, value_name = "N")]
     pub sample_columns: u32,
 
-    /// Master output gain (linear).
-    #[arg(long, default_value_t = 3.0, value_name = "GAIN")]
+    /// Master output gain (linear).  The output is scaled down instead of
+    /// clipped when it would exceed full scale.
+    #[arg(long, default_value_t = 4.0, value_name = "GAIN")]
     pub gain: f32,
 
     /// Output audio sample rate in Hz.

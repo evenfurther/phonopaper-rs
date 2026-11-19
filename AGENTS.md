@@ -176,7 +176,7 @@ introduce `rand`, `HashMap` iteration order, transcendental float functions
 > | `synthesizer_column/single_col/realistic`         |  17 µs  |
 > | `synthesizer_column/single_col/all_bins`          | 120 µs  |
 > | `column_amplitudes_from_image/720px`              |   3 µs  |
-> | `audio_to_spectrogram/encode_3s`                  |   9 ms  |
+> | `audio_to_spectrogram/encode_3s`                  |  31 ms  |
 
 ## Rules
 
@@ -280,11 +280,10 @@ The canonical command builds with default features, so `decode/nn/*.rs` (the
 | `audio.rs` — `read_mp3` multi-track skip branch | `packet.track_id != track_id` guard; unreachable because `symphonia-bundle-mp3` produces a single-track stream for any valid MPEG file. |
 | `audio.rs` — `read_mp3` missing-codec-params guard | `let Some(CodecParameters::Audio(…)) … else` fallback; unreachable because `default_track(TrackType::Audio)` only returns tracks whose `codec_params` is `Some(CodecParameters::Audio)`. |
 | `decode/wav.rs:30-33` | Sample-buffer > 4 GiB overflow guard; untestable in practice. |
-| `decode/synth.rs:322,609-610` | `assert_eq!` format-string arguments; only reachable on panic, not normal test flow. |
-| `decode/synth.rs:428-430` | Zero-phasor reset branch in `renormalize()`; unreachable because phasors are unit-complex numbers that can only drift to zero under extreme floating-point pathology, not in normal synthesis. |
-| `decode/synth.rs:460-515` | Body of the `#[inline(always)]` `fill_phasor_im` helper; active-bin tests exercise it, but current LLVM coverage attributes its inlined body to the call site and reports these lines as uncovered. |
-| `decode/synth.rs:619` | `synth.renormalize()` call inside `spectrogram_to_audio`; only triggered when `num_columns ≥ RENORM_INTERVAL` (128). No test synthesises that many columns; adding such a test would be expensive and the branch is covered by the direct `Synthesizer::renormalize` unit test. |
-| `encode.rs:190` | Zero-padding branch that is dead code under the current frame-counting formula. |
+| `decode/synth.rs:344,633-636` | `assert_eq!` format-string arguments; only reachable on panic, not normal test flow. |
+| `decode/synth.rs:450-451` | Zero-phasor reset branch in `renormalize()`; unreachable because phasors are unit-complex numbers that can only drift to zero under extreme floating-point pathology, not in normal synthesis. |
+| `decode/synth.rs:482-537` | Body of the `#[inline(always)]` `fill_phasor_im` helper; active-bin tests exercise it, but current LLVM coverage attributes its inlined body to the call site and reports these lines as uncovered. |
+| `decode/synth.rs:645` | `synth.renormalize()` call inside `spectrogram_to_audio`; only triggered when `num_columns ≥ RENORM_INTERVAL` (128). No test synthesises that many columns; adding such a test would be expensive and the branch is covered by the direct `Synthesizer::renormalize` unit test. |
 | `vector.rs:601-603,618-620,628-629` | Error-closure bodies inside `ok_or_else(|| …)` calls in `image_from_pdf`; the corresponding `image_from_pdf_error_*` tests do exercise these paths, but LLVM counts multi-line closure bodies as separate regions and marks them uncovered when `rustfmt` spreads them across lines. |
 | `vector.rs:632-638` | Size-mismatch error block in `image_from_pdf`; same LLVM multi-line closure artifact as above — the `image_from_pdf_error_size_mismatch` test exercises this path. |
 | `vector.rs:647-650` | `GrayImage::from_raw` returning `None` inside `image_from_pdf`; unreachable because the `pixels.len() != img_w * img_h` guard immediately above guarantees the dimensions are consistent. |

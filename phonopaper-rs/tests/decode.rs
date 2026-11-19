@@ -648,7 +648,7 @@ fn synthesizer_options_returns_construction_options() {
 // ─── SynthesisOptions::default ───────────────────────────────────────────────
 
 /// `SynthesisOptions::default()` produces the documented defaults:
-/// `sample_rate = SAMPLE_RATE`, `gain = 3.0`, `decode_gamma = 1.0`, and
+/// `sample_rate = SAMPLE_RATE`, `gain = 4.0`, `decode_gamma = 1.0`, and
 /// `mode = AmplitudeMode::Db { min_db: -60.0, max_db: -10.0 }`.
 #[test]
 fn synthesis_options_default_values() {
@@ -658,7 +658,7 @@ fn synthesis_options_default_values() {
         opts.sample_rate, SAMPLE_RATE,
         "default sample_rate should be SAMPLE_RATE"
     );
-    assert!((opts.gain - 3.0).abs() < 1e-6, "default gain should be 3.0");
+    assert!((opts.gain - 4.0).abs() < 1e-6, "default gain should be 4.0");
     assert!(
         (opts.decode_gamma - 1.0).abs() < 1e-6,
         "default decode_gamma should be 1.0"
@@ -989,4 +989,85 @@ fn column_amplitudes_from_image_into_auto_detect_markers() {
         max_amp < 0.1,
         "white data area should decode to near-zero amplitudes, max={max_amp:.4}"
     );
+}
+
+// ─── peak normalisation ──────────────────────────────────────────────────────
+
+/// `spectrogram_to_audio` scales loud output down instead of clipping it, so
+/// the waveform shape (and thus the spectrum) is preserved.
+#[test]
+fn spectrogram_to_audio_normalises_instead_of_clipping() {
+    const SPS: usize = 353;
+    let mut spec = Spectrogram::new(8);
+    for col in 0..8 {
+        for bin in (100..300).step_by(4) {
+            spec.set(col, bin, 1.0);
+        }
+    }
+    let opts = SynthesisOptions {
+        gain: 1.0,
+        mode: AmplitudeMode::Linear { threshold: None },
+        ..SynthesisOptions::default()
+    };
+    let mut batch = vec![0.0_f32; 8 * SPS];
+    spectrogram_to_audio::<_, SPS>(&spec, &opts, &mut batch);
+
+    let mut synth = Synthesizer::<SPS>::new(opts);
+    let mut raw = Vec::with_capacity(8 * SPS);
+    for col in 0..8 {
+        let mut chunk = [0.0_f32; SPS];
+        synth.synthesize_column_unclipped(spec.column_or_panic(col), &mut chunk);
+        raw.extend_from_slice(&chunk);
+    }
+    let raw_peak = raw.iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
+    assert!(raw_peak > 1.0, "test needs a signal louder than full scale");
+
+    let peak = batch.iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
+    assert!(
+        (peak - 1.0).abs() < 1e-5,
+        "normalised peak should be 1.0, got {peak}"
+    );
+    for (b, r) in batch.iter().zip(&raw) {
+        assert!(
+            (b - r / raw_peak).abs() < 1e-4,
+            "batch output must be raw / peak"
+        );
+    }
+}
+
+/// `synthesize_column` still hard-clips (real-time use), while
+/// `synthesize_column_unclipped` returns the raw sum.
+#[test]
+fn synthesize_column_clips_but_unclipped_does_not() {
+    const SPS: usize = 64;
+    let mut amps = vec![0.0_f32; TOTAL_BINS];
+    for a in amps.iter_mut().skip(100).step_by(4).take(50) {
+        *a = 1.0;
+    }
+    let opts = SynthesisOptions {
+        gain: 1.0,
+        mode: AmplitudeMode::Linear { threshold: None },
+        ..SynthesisOptions::default()
+    };
+    let mut clipped = [0.0_f32; SPS];
+    let mut raw = [0.0_f32; SPS];
+    Synthesizer::<SPS>::new(opts).synthesize_column(&amps, &mut clipped);
+    Synthesizer::<SPS>::new(opts).synthesize_column_unclipped(&amps, &mut raw);
+    assert!(raw.iter().any(|s| s.abs() > 1.0));
+    for (c, r) in clipped.iter().zip(&raw) {
+        assert!((c - r.clamp(-1.0, 1.0)).abs() < 1e-6);
+    }
+}
+
+/// `normalize_peak` leaves quiet buffers alone and scales loud ones to 1.0.
+#[test]
+fn normalize_peak_behaviour() {
+    let mut quiet = vec![0.5_f32, -0.25, 1.0];
+    assert!((phonopaper_rs::decode::normalize_peak(&mut quiet) - 1.0).abs() < f32::EPSILON);
+    assert_eq!(quiet, vec![0.5, -0.25, 1.0]);
+
+    let mut loud = vec![2.0_f32, -4.0, 1.0];
+    let scale = phonopaper_rs::decode::normalize_peak(&mut loud);
+    assert!((scale - 0.25).abs() < 1e-6);
+    assert_eq!(loud, vec![0.5, -1.0, 0.25]);
 }

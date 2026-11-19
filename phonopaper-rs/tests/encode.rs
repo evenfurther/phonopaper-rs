@@ -211,43 +211,50 @@ fn zero_hop_size_is_error() {
     assert!(result.is_err(), "expected error for hop_size = 0");
 }
 
-/// A sample buffer shorter than `fft_window` yields zero FFT frames, so
-/// `audio_to_spectrogram` returns an empty (0-column) spectrogram rather than
+/// An empty sample buffer yields an empty (0-column) spectrogram rather than
 /// an error.
 #[test]
-fn too_short_input_returns_empty_spectrogram() {
+fn empty_input_returns_empty_spectrogram() {
     let opts = AnalysisOptions {
         fft_window: 1024,
         hop_size: 512,
         min_db: -100.0,
         max_db: -10.0,
     };
-    // 512 samples < fft_window (1024) → 0 frames.
-    let spec = audio_to_spectrogram(&[0.0f32; 512], SAMPLE_RATE, &opts)
-        .expect("short input should not be an error");
-    assert_eq!(
-        spec.num_columns(),
-        0,
-        "a sample buffer shorter than fft_window should produce a 0-column spectrogram"
-    );
+    let spec =
+        audio_to_spectrogram(&[], SAMPLE_RATE, &opts).expect("empty input should not be an error");
+    assert_eq!(spec.num_columns(), 0, "empty input should give 0 columns");
 }
 
-/// `audio_to_spectrogram` with a buffer of exactly `fft_window` samples
-/// produces exactly 1 FFT frame.
+/// The spectrogram has exactly `ceil(len / hop_size)` columns, independent of
+/// the FFT window, so that a decoded image lasts as long as the source audio.
+/// Inputs shorter than the window are zero-padded rather than dropped.
 #[test]
-fn exactly_one_fft_window_gives_one_frame() {
+fn column_count_is_ceil_len_over_hop() {
     let opts = AnalysisOptions {
-        fft_window: 512,
+        fft_window: 4096,
         hop_size: 256,
         min_db: -100.0,
         max_db: -10.0,
     };
-    let samples = vec![0.0f32; 512]; // exactly fft_window
-    let spec = audio_to_spectrogram(&samples, SAMPLE_RATE, &opts)
-        .expect("buffer of exactly fft_window should produce one frame");
-    assert_eq!(
-        spec.num_columns(),
-        1,
-        "exactly one window yields exactly one frame"
-    );
+    for (len, expected) in [(1, 1), (255, 1), (256, 1), (257, 2), (512, 2), (1000, 4)] {
+        let spec = audio_to_spectrogram(&vec![0.0f32; len], SAMPLE_RATE, &opts).unwrap();
+        assert_eq!(
+            spec.num_columns(),
+            expected,
+            "{len} samples at hop 256 should give {expected} columns"
+        );
+    }
+}
+
+/// `fft_window` must be a power of two.
+#[test]
+fn non_power_of_two_fft_window_is_error() {
+    let opts = AnalysisOptions {
+        fft_window: 3000,
+        hop_size: 256,
+        min_db: -100.0,
+        max_db: -10.0,
+    };
+    assert!(audio_to_spectrogram(&[0.0f32; 1024], SAMPLE_RATE, &opts).is_err());
 }

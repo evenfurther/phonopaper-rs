@@ -2,16 +2,16 @@
 //!
 //! The `PhonoPaper` format encodes audio as a grayscale spectrogram image:
 //! - **X axis (left → right):** time
-//! - **Y axis (top → bottom):** frequency, from high (bin 0 ≈ 16 744 Hz,
-//!   above hearing) down to low (bin 383 ≈ 66 Hz, C2)
+//! - **Y axis (top → bottom):** frequency, from high (bin 0 ≈ 16 504 Hz,
+//!   above hearing) down to low (bin 383 = 65.406 Hz, C2)
 //! - **Pixel brightness:** white = silence, black = maximum amplitude
 //!
 //! The frequency axis uses a logarithmic (musical) scale with 384 bins.  The
-//! musically useful range is approximately **C2 (≈ 65 Hz) to C8 (≈ 4186 Hz)**
-//! — 6 audible octaves.  The top 96 bins (rows 0–179 of the data area) fall
-//! above C8 and are essentially inaudible; the reference Android application
-//! synthesises only bins 96–336 (C3–C8).  The formula uses 4 subdivisions per
-//! semitone, giving 48 bins per octave and 384 bins total.
+//! grid starts at **C2 = 65.406 Hz** at the bottom of the image (the value of
+//! `PHONOPAPER_LOWEST_FREQ` in the official `PhonoPaper` / Virtual ANS
+//! programs, and "from 65.4 Hz" in the official specification image) and
+//! spans 8 octaves upwards.  Bin 95 is C8 (4186 Hz).  The formula uses 4
+//! subdivisions per semitone, giving 48 bins per octave and 384 bins total.
 
 /// Number of frequency subdivisions per semitone.
 pub const MULTITONES: usize = 4;
@@ -29,14 +29,18 @@ pub const TOTAL_BINS: usize = OCTAVES * SEMITONES_PER_OCTAVE * MULTITONES;
 pub const BINS_PER_OCTAVE: usize = SEMITONES_PER_OCTAVE * MULTITONES;
 
 /// Lowest frequency in the format — the frequency at bin index `TOTAL_BINS - 1`
-/// (≈ 66.36 Hz, C2).
-pub const LOW_FREQ: f64 = 66.357_748_918_998_77;
+/// (C2 = 65.406 Hz).
+///
+/// This is `PHONOPAPER_LOWEST_FREQ` in the official `PhonoPaper` and Virtual
+/// ANS programs (`65.406_36` as an `f32`), and the official specification
+/// image states "low freqs from 65.4Hz".
+pub const LOW_FREQ: f64 = 65.406_391_325_149_66;
 
 /// Highest frequency in the format — the frequency at bin index `0`
-/// (≈ 16 744 Hz, above the human hearing range).
+/// (≈ 16 504 Hz, `LOW_FREQ × 2^(383/48)`).
 ///
-/// The highest *audible* bin is index 96, which corresponds to C8 (≈ 4186 Hz).
-pub const HIGH_FREQ: f64 = 16_744.036_179_619_156;
+/// Index 95 corresponds to C8 (≈ 4186 Hz).
+pub const HIGH_FREQ: f64 = 16_503.980_258_575_066;
 
 /// Standard audio sample rate used for synthesis and analysis.
 pub const SAMPLE_RATE: u32 = 44_100;
@@ -56,24 +60,26 @@ pub const ANDROID_SPS: f64 = SAMPLE_RATE as f64 / 125.0; // = 352.8
 
 // Compile-time constants used in the frequency formulas, pre-cast to f64 to
 // avoid repeated usize→f64 casts in hot paths.
-// Values are 48, 252 and 384 — all representable exactly as f64.
+// Values are 48, 251 and 384 — all representable exactly as f64.
 #[expect(clippy::cast_precision_loss, reason = "value is 48, exact in f64")]
 const BINS_F64: f64 = (SEMITONES_PER_OCTAVE * MULTITONES) as f64; // = 48.0
-#[expect(clippy::cast_precision_loss, reason = "value is 252, exact in f64")]
-const PIVOT_F64: f64 = (63 * MULTITONES) as f64; // = 252.0
+/// Bin index of A4 = 440 Hz.  Bin 383 is then `440 × 2^(−132/48)` = C2,
+/// i.e. exactly 11 semitones (44 bins) below A4 plus two octaves.
+#[expect(clippy::cast_precision_loss, reason = "value is 251, exact in f64")]
+const PIVOT_F64: f64 = (TOTAL_BINS - 1 - 33 * MULTITONES) as f64; // = 251.0
 #[expect(clippy::cast_precision_loss, reason = "value is 384, exact in f64")]
 const TOTAL_BINS_F64: f64 = TOTAL_BINS as f64; // = 384.0
 
 /// Convert a frequency bin index to its corresponding frequency in Hz.
 ///
-/// - Index `0` → highest frequency (≈ 16 744 Hz, above hearing; top of image)
-/// - Index `96` → C8 ≈ 4186 Hz (top of the audible range)
-/// - Index `252` → A4 = 440 Hz
-/// - Index `TOTAL_BINS - 1` → lowest frequency (≈ 66.36 Hz, C2; bottom of image)
+/// - Index `0` → highest frequency (≈ 16 504 Hz, above hearing; top of image)
+/// - Index `95` → C8 ≈ 4186 Hz
+/// - Index `251` → A4 = 440 Hz
+/// - Index `TOTAL_BINS - 1` → lowest frequency (C2 = 65.406 Hz; bottom of image)
 ///
-/// The formula matches the reference Android `PhonoPaper` application:
-/// `freq = 2^((63 × MULTITONES − index) / (12 × MULTITONES)) × 440`
-///      `= 2^((252 − index) / 48) × 440`
+/// The official application computes `LOWEST_FREQ × 2^(row_from_bottom / 48)`
+/// with `LOWEST_FREQ = 65.406 Hz`, which is equivalent to:
+/// `freq = 2^((251 − index) / 48) × 440`
 #[must_use]
 pub fn index_to_freq(index: usize) -> f64 {
     // index is at most TOTAL_BINS-1 = 383; the cast to f64 is exact.

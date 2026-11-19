@@ -15,7 +15,7 @@
 //! | [`markers`] | [`DataBounds`], [`MarkerColumnGeometry`], and marker detection |
 //! | [`refine`]  | Conservative upright outer-corner refinement |
 //! | [`image`]   | [`image_to_spectrogram`], [`column_amplitudes_from_image`], [`column_amplitudes_from_image_into`] |
-//! | [`synth`]   | [`AmplitudeMode`], [`SynthesisOptions`], [`Synthesizer`], [`spectrogram_to_audio`] |
+//! | [`synth`]   | [`AmplitudeMode`], [`SynthesisOptions`], [`Synthesizer`], [`spectrogram_to_audio`], [`normalize_peak`] |
 //! | [`wav`]     | [`decode_image_to_wav`], [`decode_image_to_wav_sps`], [`write_wav`] |
 //! | [`nn`]      | Neural-network pattern detector (`nn-detector` feature): `PatternDetector`, `Detection` |
 
@@ -38,5 +38,7 @@ pub use markers::{
     detect_markers_at_column,
 };
 pub use refine::{CornerRefinement, refine_pattern_corners};
-pub use synth::{AmplitudeMode, SynthesisOptions, Synthesizer, spectrogram_to_audio};
+pub use synth::{
+    AmplitudeMode, SynthesisOptions, Synthesizer, normalize_peak, spectrogram_to_audio,
+};
 pub use wav::{decode_image_to_wav, decode_image_to_wav_sps, write_wav};
