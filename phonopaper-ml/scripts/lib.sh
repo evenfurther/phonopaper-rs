@@ -31,7 +31,7 @@ try:
 except (OSError, ValueError):
     raise SystemExit(1)
 
-if manifest.get("format_version") != 2:
+if manifest.get("format_version") != 3:
     raise SystemExit(1)
 config = manifest.get("config")
 if not isinstance(config, dict) or config.get("source_scale") != expected_scale:
@@ -52,7 +52,7 @@ prepare_dataset() {
     local -a generator=("$@")
 
     if dataset_is_compatible "$dataset" "$source_scale"; then
-        echo "== reusing compatible v2 dataset: $dataset (source_scale=$source_scale)"
+        echo "== reusing compatible v3 dataset: $dataset (source_scale=$source_scale)"
         return
     fi
 

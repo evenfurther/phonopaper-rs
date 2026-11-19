@@ -122,9 +122,9 @@ pub struct CornerCellTargets {
 
 /// Compute the complete structured detector loss from one trunk pass.
 ///
-/// One decoded-coordinate comparison chooses either the direct target ordering
-/// or its equivalent 180° ordering per sample. That assigned target is shared
-/// by every spatial term. Negatives are excluded from all spatial terms, and
+/// Targets must be in canonical corner order (`model::canonical_corner_order`),
+/// so that each corner channel has a single image-determined target; the
+/// same target is shared by every spatial term. Negatives are excluded from all spatial terms, and
 /// an all-negative batch therefore has finite, exactly zero spatial losses.
 #[must_use]
 pub fn detection_loss_breakdown(prediction: DetectorOutput, targets: Tensor<2>) -> DetectionLoss {
@@ -138,7 +138,11 @@ pub fn detection_loss_breakdown(prediction: DetectorOutput, targets: Tensor<2>) 
 
     let predicted = prediction.output.narrow(1, 1, 8);
     let truth = targets.narrow(1, 1, 8);
-    let assigned = assign_corner_targets(predicted.clone(), truth);
+    // Targets are already in canonical corner order (see `data::load_split`
+    // and `model::canonical_corner_order`); every channel therefore has a
+    // single, image-determined target and no per-sample re-assignment is
+    // needed.
+    let assigned = truth;
     let [_, _, h, w] = prediction.heatmaps.dims();
     let cells = corner_cell_targets(assigned.clone(), h, w);
     let heatmap = assigned_heatmap_loss(prediction.heatmaps, &cells, present.clone());

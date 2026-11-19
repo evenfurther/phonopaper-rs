@@ -6,7 +6,7 @@
 #
 # Tunables are environment variables, for example:
 #
-#   DATASET=dataset-v2-scale3-300k DATASET_COUNT=300000 \
+#   DATASET=dataset-v3-scale3-300k DATASET_COUNT=300000 \
 #       sbatch slurm/generate-dataset.sbatch
 #
 # The generator uses Rayon and this job limits it to the allocated CPU count.
@@ -26,7 +26,7 @@ ML="$REPO/phonopaper-ml"
 # shellcheck source=../scripts/lib.sh
 source "$ML/scripts/lib.sh"
 
-DATASET="$(absolute_from_ml "${DATASET:-dataset-v2-scale3-200k}")"
+DATASET="$(absolute_from_ml "${DATASET:-dataset-v3-scale3-200k}")"
 DATASET_COUNT="${DATASET_COUNT:-200000}"
 SOURCE_SCALE="${SOURCE_SCALE:-3}"
 IMAGE_SIZE="${IMAGE_SIZE:-128}"

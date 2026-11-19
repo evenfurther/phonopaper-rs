@@ -7,7 +7,7 @@ use burn::data::dataset::{Dataset, InMemDataset};
 use burn::prelude::*;
 use phonopaper_dataset::labels::{read_labels, read_manifest};
 
-use crate::model::OUTPUT_SIZE;
+use crate::model::{OUTPUT_SIZE, canonical_corner_order};
 
 /// One image with its ground truth, fully loaded in memory.
 #[derive(Debug, Clone)]
@@ -17,7 +17,8 @@ pub struct Item {
     /// Image side in pixels.
     pub size: usize,
     /// Presence flag followed by eight normalised corner coordinates (zeros
-    /// when absent) — exactly the layout the network predicts.
+    /// when absent) — exactly the layout the network predicts.  Corners are
+    /// in [canonical order](crate::model::canonical_corner_order).
     pub target: [f32; OUTPUT_SIZE],
 }
 
@@ -91,6 +92,11 @@ pub fn load_split(dir: &Path, split: Split) -> Result<(InMemDataset<Item>, usize
                 target[1 + 2 * i] = x;
                 target[2 + 2 * i] = y;
             }
+        }
+        if target[0] > 0.5 {
+            let mut corners = [0.0_f32; 8];
+            corners.copy_from_slice(&target[1..]);
+            target[1..].copy_from_slice(&canonical_corner_order(corners));
         }
         items.push(Item {
             pixels: img.into_raw(),

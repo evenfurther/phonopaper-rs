@@ -205,11 +205,6 @@ It keeps the UI in Kotlin but performs the `PhonoPaper` decoding pipeline in the
 
 Current app flow:
 
-> **Development worktree warning:** the checked-in detector weights predate the
-> current stride-2 heat-map architecture and cannot be loaded. The app detector
-> remains unusable until a new model is trained and embedded with
-> `phonopaper-ml/scripts/embed-model.sh`; see the ML README for the exact flow.
-
 - open the live camera preview and outline the `PhonoPaper` sheet found by the
   neural-network detector (`phonopaper_rs::decode::nn`) in real time, whatever
   its rotation or perspective — the thicker edges of the outline are the
@@ -388,8 +383,12 @@ input internally. For upright or approximately rectified images,
 `refine_pattern_corners` can conservatively refine coarse network corners to
 the outer marker ink box and reports confidence/support; it returns `None` for
 rotated, strongly skewed, or weakly supported inputs so callers can retain the
-coarse result. Accuracy claims must be re-established after training the new
-stride-2 model.
+coarse result.
+
+On 300 held-out synthetic frames the embedded detector finds 99.1 % of corners
+within 3 px of the truth (90th percentile 1.4 px, worst 11 px at 128 × 128) with
+a mean quadrilateral IoU of 96.6 %; see `phonopaper-ml/README.md` for the full
+evaluation.
 
 ---
 

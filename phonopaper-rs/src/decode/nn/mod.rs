@@ -53,7 +53,8 @@ use image::imageops::FilterType;
 use super::{CornerRefinement, refine_pattern_corners};
 
 pub use model::{
-    Detection, Detector, DetectorConfig, OUTPUT_SIZE, decode_output, image_tensor, soft_argmax,
+    Detection, Detector, DetectorConfig, OUTPUT_SIZE, canonical_corner_order, decode_output,
+    image_tensor, soft_argmax,
 };
 
 /// Trained weights exported by `phonopaper-train` in Burnpack format.

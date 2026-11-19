@@ -211,6 +211,58 @@ impl Canvas {
         }
     }
 
+    /// Linear motion blur: average of `length` samples along the horizontal
+    /// (`horizontal = true`) or vertical axis, centred on each pixel.
+    pub fn motion_blur(&mut self, length: usize, horizontal: bool) {
+        if length < 2 {
+            return;
+        }
+        let r = length / 2;
+        let src = self.data.clone();
+        #[expect(clippy::cast_precision_loss, reason = "kernel length is tiny")]
+        let inv = 1.0 / length as f32;
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let mut acc = 0.0;
+                for k in 0..length {
+                    let (sx, sy) = if horizontal {
+                        ((x + k).saturating_sub(r).min(self.width - 1), y)
+                    } else {
+                        (x, (y + k).saturating_sub(r).min(self.height - 1))
+                    };
+                    acc += src[sy * self.width + sx];
+                }
+                self.data[y * self.width + x] = acc * inv;
+            }
+        }
+    }
+
+    /// Multiply the canvas by a linear illumination ramp: the factor goes
+    /// from `1 - strength` to `1` along the direction `(gx, gy)`.
+    pub fn illumination_gradient(&mut self, gx: f64, gy: f64, strength: f32) {
+        let norm = (gx * gx + gy * gy).sqrt().max(1e-9);
+        let (gx, gy) = (gx / norm, gy / norm);
+        #[expect(clippy::cast_precision_loss, reason = "canvas dimensions are small")]
+        let (w, h) = (self.width as f64, self.height as f64);
+        let span = (w * gx.abs() + h * gy.abs()).max(1e-9);
+        let offset =
+            (if gx < 0.0 { -w * gx } else { 0.0 }) + (if gy < 0.0 { -h * gy } else { 0.0 });
+        self.map_in_place(|x, y, v| {
+            let t = f32_of(((px(x) + 0.5) * gx + (px(y) + 0.5) * gy + offset) / span);
+            v * (1.0 - strength * (1.0 - t))
+        });
+    }
+
+    /// Darken the half-plane on the positive side of the line through `a`
+    /// and `b` by `factor` (a cast shadow).
+    pub fn shadow(&mut self, a: Point, b: Point, factor: f32) {
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        self.map_in_place(|x, y, v| {
+            let cross = dx * (px(y) + 0.5 - a.y) - dy * (px(x) + 0.5 - a.x);
+            if cross > 0.0 { v * factor } else { v }
+        });
+    }
+
     fn convolve_separable(&mut self, kernel: &[f32]) {
         let r = kernel.len() / 2;
         let mut tmp = vec![0.0_f32; self.data.len()];

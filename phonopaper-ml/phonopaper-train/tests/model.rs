@@ -4,7 +4,7 @@ use burn::prelude::*;
 use burn::tensor::Device;
 use phonopaper_train::model::{
     CORNER_FUSION_STAGES, CORNER_HEAD_CHANNELS, Detection, DetectorConfig, DetectorOutput,
-    OUTPUT_SIZE, decode_corners, decode_output, soft_argmax,
+    OUTPUT_SIZE, canonical_corner_order, decode_corners, decode_output, soft_argmax,
 };
 use phonopaper_train::training::{
     assign_corner_targets, corner_cell_targets, detection_loss_breakdown, edge_vector_loss,
@@ -273,18 +273,18 @@ fn soft_argmax_recovers_a_peaked_cell() {
 }
 
 #[test]
-fn corner_head_fuses_all_stages_and_exposes_raw_maps() {
+fn corner_head_fuses_stride_4_to_32_stages_and_exposes_raw_maps() {
     let device = Device::flex();
     let model = DetectorConfig::new().init(&device);
-    assert_eq!(CORNER_FUSION_STAGES, 5);
+    assert_eq!(CORNER_FUSION_STAGES, 4);
     assert_eq!(CORNER_HEAD_CHANNELS, 12);
-    assert_eq!(model.heatmap_size(), 64);
+    assert_eq!(model.heatmap_size(), 32);
     let prediction = model.forward_with_heatmaps(Tensor::<4>::zeros([2, 1, 128, 128], &device));
     assert_eq!(prediction.output.dims(), [2, OUTPUT_SIZE]);
-    assert_eq!(prediction.corner_raw.dims(), [2, 12, 64, 64]);
-    assert_eq!(prediction.heatmaps.dims(), [2, 4, 64, 64]);
-    assert_eq!(prediction.x_offsets.dims(), [2, 4, 64, 64]);
-    assert_eq!(prediction.y_offsets.dims(), [2, 4, 64, 64]);
+    assert_eq!(prediction.corner_raw.dims(), [2, 12, 32, 32]);
+    assert_eq!(prediction.heatmaps.dims(), [2, 4, 32, 32]);
+    assert_eq!(prediction.x_offsets.dims(), [2, 4, 32, 32]);
+    assert_eq!(prediction.y_offsets.dims(), [2, 4, 32, 32]);
 }
 
 fn raw_corner_maps(
@@ -432,8 +432,29 @@ fn raw_corner_maps_follow_variable_input_size() {
             .forward_with_heatmaps(Tensor::<4>::zeros([1, 1, input_size, input_size], &device));
         assert_eq!(
             prediction.corner_raw.dims(),
-            [1, 12, input_size / 2, input_size / 2]
+            [1, 12, input_size / 4, input_size / 4]
         );
+    }
+}
+
+#[test]
+fn canonical_corner_order_is_invariant_under_the_half_turn() {
+    // Upright sheet: TL, TR, BR, BL stays as is.
+    let upright = [0.1, 0.1, 0.9, 0.1, 0.9, 0.4, 0.1, 0.4];
+    assert_eq!(canonical_corner_order(upright), upright);
+    // The same sheet labelled upside down maps to the same canonical order.
+    let turned = [0.9, 0.4, 0.1, 0.4, 0.1, 0.1, 0.9, 0.1];
+    assert_eq!(canonical_corner_order(turned), upright);
+    // A portrait sheet (bands left and right) also gets one ordering.
+    let portrait = [0.2, 0.9, 0.2, 0.1, 0.5, 0.1, 0.5, 0.9];
+    let rotated = [0.5, 0.1, 0.5, 0.9, 0.2, 0.9, 0.2, 0.1];
+    assert_eq!(
+        canonical_corner_order(portrait),
+        canonical_corner_order(rotated)
+    );
+    for c in [upright, turned, portrait, rotated] {
+        let once = canonical_corner_order(c);
+        assert_eq!(canonical_corner_order(once), once, "idempotent");
     }
 }
 
