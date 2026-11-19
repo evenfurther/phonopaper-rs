@@ -215,3 +215,48 @@ fn rectify_pattern_produces_upright_ink_box() {
     let fallback = rectify_pattern(&scene, [[10.0, 10.0]; 4]).into_luma8();
     assert_eq!((fallback.width(), fallback.height()), (320, 240));
 }
+
+/// Phone photo of a browser image result showing a `PhonoPaper` print, with a
+/// round icon over the lower-left corner and a dark "visit site" pill button
+/// just below the bottom band.  The v3 detector put the bottom-right corner
+/// on that button, about 135 px below the band.
+const SCREEN_PHOTO: &[u8] = include_bytes!("fixtures/screen-photo-browser-result.jpg");
+
+/// Hand-measured outer ink-box corners `[TL, TR, BR, BL]` of [`SCREEN_PHOTO`]
+/// (961 × 1280 pixels).
+const SCREEN_PHOTO_CORNERS: [[f32; 2]; 4] = [
+    [61.0, 626.0],
+    [770.0, 627.0],
+    [760.0, 1114.0],
+    [74.0, 1119.0],
+];
+
+#[test]
+fn screen_photo_corners_lie_on_the_marker_bands() {
+    let corners = detect_pattern_corners(SCREEN_PHOTO)
+        .expect("valid image")
+        .expect("pattern detected");
+    let (width, height) = (961.0_f32, 1280.0_f32);
+    for (i, (found, truth)) in corners.iter().zip(SCREEN_PHOTO_CORNERS).enumerate() {
+        let (x, y) = (found[0] * width, found[1] * height);
+        // Bands are what matters for decoding: vertical error must be small.
+        assert!(
+            (y - truth[1]).abs() < 15.0,
+            "corner {i}: y={y}, expected {}",
+            truth[1]
+        );
+        assert!(
+            (x - truth[0]).abs() < 30.0,
+            "corner {i}: x={x}, expected {}",
+            truth[0]
+        );
+    }
+}
+
+#[test]
+fn decode_screen_photo() {
+    let pcm = decode_image_to_pcm(SCREEN_PHOTO).expect("screen photo decodes");
+    // The print spans about 700 image columns, i.e. hundreds of spectrogram
+    // columns of 353 samples each.
+    assert!(pcm.len() > 400 * 353, "only {} samples", pcm.len());
+}

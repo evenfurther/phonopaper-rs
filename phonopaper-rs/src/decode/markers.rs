@@ -328,6 +328,36 @@ pub fn detect_marker_geometry_at_column(
     image: &DynamicImage,
     col_x: u32,
 ) -> Result<MarkerColumnGeometry> {
+    let height = image.height();
+    detect_marker_geometry_at_column_in_zones(
+        image,
+        col_x,
+        0..height * 3 / 10,
+        height * 7 / 10..height,
+    )
+}
+
+/// Like [`detect_marker_geometry_at_column`], but with caller-chosen search
+/// zones: the top band's stripes are looked for among dark runs starting in
+/// `top_zone`, the bottom band's among dark runs starting in `bottom_zone`
+/// (row ranges, end-exclusive).
+///
+/// [`detect_marker_geometry_at_column`] uses the top and bottom 30 % of the
+/// image.  Callers that already know roughly where each band lies, such as a
+/// check of a neural-network detection on a rectified crop, can use narrower
+/// or shifted zones instead.
+///
+/// # Errors
+///
+/// Returns [`PhonoPaperError::MarkerNotFound`] if no valid marker topology is
+/// found in either zone of column `col_x`, if the two bands disagree, or if
+/// `col_x` is out of bounds for the image.
+pub fn detect_marker_geometry_at_column_in_zones(
+    image: &DynamicImage,
+    col_x: u32,
+    top_zone: std::ops::Range<u32>,
+    bottom_zone: std::ops::Range<u32>,
+) -> Result<MarkerColumnGeometry> {
     let (width, height) = image.dimensions();
 
     if col_x >= width {
@@ -369,15 +399,19 @@ pub fn detect_marker_geometry_at_column(
     // Looking for the full light/dark stripe topology is much stricter than
     // merely finding a long dark run, which avoids false positives on
     // arbitrary photographs and random noise.
-    let top_limit = height * 3 / 10;
-    let bot_limit = height * 7 / 10;
-
-    let top_marker = find_marker_candidate(&runs, MarkerSide::Top, 0, top_limit).ok_or(
-        PhonoPaperError::MarkerNotFound("no valid top marker pattern found"),
-    )?;
-    let bottom_marker = find_marker_candidate(&runs, MarkerSide::Bottom, bot_limit, height).ok_or(
-        PhonoPaperError::MarkerNotFound("no valid bottom marker pattern found"),
-    )?;
+    let top_marker = find_marker_candidate(&runs, MarkerSide::Top, top_zone.start, top_zone.end)
+        .ok_or(PhonoPaperError::MarkerNotFound(
+            "no valid top marker pattern found",
+        ))?;
+    let bottom_marker = find_marker_candidate(
+        &runs,
+        MarkerSide::Bottom,
+        bottom_zone.start,
+        bottom_zone.end,
+    )
+    .ok_or(PhonoPaperError::MarkerNotFound(
+        "no valid bottom marker pattern found",
+    ))?;
 
     let data_top = top_marker.data_edge;
     let data_bottom = bottom_marker.data_edge;
