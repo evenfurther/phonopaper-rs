@@ -137,4 +137,5 @@ dependencies {
     implementation 'androidx.camera:camera-lifecycle:1.7.0'
     implementation 'androidx.camera:camera-view:1.7.0'
     implementation 'androidx.core:core-ktx:1.19.1'
+    implementation 'com.google.android.material:material:1.14.0'
 }

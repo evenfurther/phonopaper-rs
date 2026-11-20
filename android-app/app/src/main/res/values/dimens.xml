@@ -1,0 +1,4 @@
+<resources>
+    <dimen name="preview_height">140dp</dimen>
+    <dimen name="side_panel_width">360dp</dimen>
+</resources>

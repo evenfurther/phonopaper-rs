@@ -28,7 +28,7 @@ This repository contains a Cargo workspace plus an Android app:
 | `phonopaper-rs` | `phonopaper-rs/` | Core library — encode, decode, render, vector output |
 | `phonopaper-cli` | `phonopaper-cli/` | `phonopaper` binary — four subcommands |
 | `phonopaper-android` | `phonopaper-android/` | JNI bridge crate that exposes Rust detection (neural network) and decoding to Android |
-| Android app | `android-app/` | Kotlin UI with live camera preview, capture/manual scrubbing controls, and a Rust-backed decoder |
+| Android app | `android-app/` | Kotlin Material 3 UI with live camera viewfinder, capture/manual scrubbing controls, and a Rust-backed decoder |
 | ML tooling | `phonopaper-ml/` | Separate workspace: deterministic synthetic dataset generator and a [burn](https://burn.dev) trainer for a neural-network pattern detector — see [`phonopaper-ml/README.md`](phonopaper-ml/README.md) |
 
 ---
@@ -203,18 +203,31 @@ The repository also includes an experimental Android application in `android-app
 It keeps the UI in Kotlin but performs the `PhonoPaper` decoding pipeline in the
 `phonopaper-android` Rust `cdylib`, which reuses `phonopaper-rs` directly.
 
+The screen is split between a full-bleed camera viewfinder and a player panel
+(below it in portrait, beside it in landscape), with a Material 3 theme that
+follows the system light/dark setting.
+
 Current app flow:
 
 - open the live camera preview and outline the `PhonoPaper` sheet found by the
   neural-network detector (`phonopaper_rs::decode::nn`) in real time, whatever
   its rotation or perspective — the thicker edges of the outline are the
   marker bands
-- automatically decode and play the current camera frame when live auto-play is enabled
-- capture the current camera frame or pick a `PhonoPaper` image from Android's document picker
+- show the detector state in a status pill over the preview (searching,
+  sheet detected, playing)
+- automatically decode and play the current camera frame when the *Auto-play*
+  chip is on
+- capture the current camera frame with the shutter button, or pick a
+  `PhonoPaper` image from the library
 - decode it in Rust: the detected quadrilateral is rectified to an upright
   image with a homography, then read with the robust per-column marker
   interpolation path (images that are already upright are read directly)
-- play the synthesized mono PCM audio with `AudioTrack`, either from the current seek position or by scrubbing directly on the image preview
+- play the synthesized mono PCM audio with `AudioTrack`: a single Play/Stop
+  button starts from the slider position (elapsed and total durations are shown
+  on each side), and a playhead follows playback over the image; with the
+  *Scrub* chip on, dragging a finger across the image plays from that column
+- keep the decoded sound and playback position across rotations and theme
+  changes
 
 The Android resources also include a dedicated adaptive launcher icon so installed builds appear with a branded app icon in the launcher.
 

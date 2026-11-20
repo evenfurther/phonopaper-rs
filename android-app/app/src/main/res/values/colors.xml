@@ -1,0 +1,16 @@
+<resources>
+    <!-- Amber brand colour, taken from the launcher icon. -->
+    <color name="brand_primary">#8A5100</color>
+    <color name="brand_on_primary">#FFFFFF</color>
+    <color name="brand_primary_container">#FFDDB8</color>
+    <color name="brand_on_primary_container">#2C1600</color>
+    <color name="brand_secondary">#3B5BA9</color>
+    <color name="brand_on_secondary">#FFFFFF</color>
+    <color name="brand_secondary_container">#DAE2FF</color>
+    <color name="brand_on_secondary_container">#001946</color>
+    <color name="viewfinder_background">#FF0B1120</color>
+    <color name="status_idle">#FF94A3B8</color>
+    <color name="status_detected">#FFF59E0B</color>
+    <color name="status_playing">#FF22C55E</color>
+    <color name="status_error">#FFEF4444</color>
+</resources>

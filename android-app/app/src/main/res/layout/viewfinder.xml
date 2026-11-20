@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Live camera viewfinder with its controls drawn over the preview. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/viewfinder_background">
+
+    <androidx.camera.view.PreviewView
+        android:id="@+id/cameraPreview"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:implementationMode="compatible"
+        app:scaleType="fitCenter" />
+
+    <com.evenfurther.phonopaper.DetectionOverlayView
+        android:id="@+id/detectionOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:importantForAccessibility="no" />
+
+    <!-- Shown instead of the preview when the camera cannot be used. -->
+    <LinearLayout
+        android:id="@+id/cameraUnavailablePanel"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="32dp"
+        android:visibility="gone">
+
+        <ImageView
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:importantForAccessibility="no"
+            android:src="@drawable/ic_no_camera"
+            app:tint="@android:color/white" />
+
+        <TextView
+            android:id="@+id/cameraUnavailableText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:gravity="center"
+            android:text="@string/camera_permission_denied"
+            android:textAppearance="?attr/textAppearanceBodyLarge"
+            android:textColor="@android:color/white" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/grantCameraButton"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/camera_grant" />
+    </LinearLayout>
+
+    <!-- Darkens the bottom of the preview so the controls stay readable. -->
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="120dp"
+        android:layout_gravity="bottom"
+        android:background="@drawable/viewfinder_scrim" />
+
+    <!-- Detector status pill. -->
+    <LinearLayout
+        android:id="@+id/cameraStatusPill"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|center_horizontal"
+        android:layout_margin="12dp"
+        android:accessibilityLiveRegion="polite"
+        android:background="@drawable/status_pill"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="12dp"
+        android:paddingTop="6dp"
+        android:paddingEnd="14dp"
+        android:paddingBottom="6dp">
+
+        <ImageView
+            android:id="@+id/cameraStatusDot"
+            android:layout_width="8dp"
+            android:layout_height="8dp"
+            android:importantForAccessibility="no"
+            android:src="@drawable/status_dot"
+            app:tint="@color/status_idle" />
+
+        <TextView
+            android:id="@+id/cameraStatusText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:maxLines="2"
+            android:text="@string/camera_waiting"
+            android:textAppearance="?attr/textAppearanceLabelLarge"
+            android:textColor="@android:color/white" />
+    </LinearLayout>
+
+    <!-- Bottom controls: auto-play toggle, shutter, image picker. -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="16dp">
+
+        <com.google.android.material.chip.Chip
+            android:id="@+id/autoplayChip"
+            style="@style/Widget.Phonopaper.ViewfinderChip"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="start|center_vertical"
+            android:checkable="true"
+            android:checked="true"
+            android:text="@string/live_autoplay"
+            app:chipIcon="@drawable/ic_autoplay"
+            app:chipIconVisible="true"
+            app:checkedIconVisible="false" />
+
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/captureFrameButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:contentDescription="@string/capture_frame"
+            android:enabled="false"
+            android:tooltipText="@string/capture_frame"
+            app:fabSize="normal"
+            app:srcCompat="@drawable/ic_camera" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/pickImageButton"
+            style="@style/Widget.Material3.Button.IconButton.Filled.Tonal"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="end|center_vertical"
+            android:contentDescription="@string/pick_image"
+            android:tooltipText="@string/pick_image"
+            app:icon="@drawable/ic_photo_library" />
+    </FrameLayout>
+</FrameLayout>
