@@ -1,0 +1,10 @@
+<resources>
+    <color name="brand_primary">#FFB95F</color>
+    <color name="brand_on_primary">#4A2800</color>
+    <color name="brand_primary_container">#693C00</color>
+    <color name="brand_on_primary_container">#FFDDB8</color>
+    <color name="brand_secondary">#B1C5FF</color>
+    <color name="brand_on_secondary">#002C71</color>
+    <color name="brand_secondary_container">#21438F</color>
+    <color name="brand_on_secondary_container">#DAE2FF</color>
+</resources>

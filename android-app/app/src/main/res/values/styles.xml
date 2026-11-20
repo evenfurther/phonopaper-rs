@@ -1,3 +1,21 @@
 <resources>
-    <style name="Theme.PhonopaperAndroid" parent="Theme.AppCompat.DayNight.NoActionBar" />
+    <style name="Theme.PhonopaperAndroid" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/brand_primary</item>
+        <item name="colorOnPrimary">@color/brand_on_primary</item>
+        <item name="colorPrimaryContainer">@color/brand_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/brand_on_primary_container</item>
+        <item name="colorSecondary">@color/brand_secondary</item>
+        <item name="colorOnSecondary">@color/brand_on_secondary</item>
+        <item name="colorSecondaryContainer">@color/brand_secondary_container</item>
+        <item name="colorOnSecondaryContainer">@color/brand_on_secondary_container</item>
+    </style>
+
+    <!-- Translucent pill shown over the camera preview. -->
+    <style name="Widget.Phonopaper.ViewfinderChip" parent="Widget.Material3.Chip.Filter">
+        <item name="chipBackgroundColor">#99000000</item>
+        <item name="chipStrokeWidth">0dp</item>
+        <item name="android:textColor">@android:color/white</item>
+        <item name="chipIconTint">@android:color/white</item>
+        <item name="checkedIconTint">@android:color/white</item>
+    </style>
 </resources>
